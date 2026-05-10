@@ -134,6 +134,7 @@ Codex CLI に渡し、進捗と応答を同じスレッドへ返します。
 | `/start repository:owner/repo` | 通常チャンネル | リポジトリを準備し、新しい作業スレッドを作ります。                             |
 | `/stop`                        | 作業スレッド   | 実行中の Codex プロセスを中断します。                                          |
 | `/plan`                        | 作業スレッド   | 次回以降の依頼で、実装前に計画を返すよう Codex へ指示します。                  |
+| `/active-threads`              | どこでも       | 現在アクティブな作業スレッドから、実行者宛てに silent mention を送ります。     |
 | `/close`                       | 作業スレッド   | Worker を終了し、スレッド状態をクローズします。Manage Threads 権限が必要です。 |
 
 `/start` の repository 入力は、すでに Bot

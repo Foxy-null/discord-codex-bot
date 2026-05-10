@@ -87,6 +87,10 @@ export class Admin implements IAdmin {
     return ok(worker);
   }
 
+  getActiveThreadIds(): string[] {
+    return [...this.state.activeThreadIds];
+  }
+
   async routeMessage(
     threadId: string,
     message: string,

@@ -23,4 +23,5 @@ export interface IAdmin {
     onProgress?: (content: string) => Promise<void>,
     onReaction?: (emoji: string) => Promise<void>,
   ): Promise<import("neverthrow").Result<string | DiscordMessage, AdminError>>;
+  getActiveThreadIds(): string[];
 }

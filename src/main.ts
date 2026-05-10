@@ -4,6 +4,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   PermissionFlagsBits,
   REST,
@@ -107,6 +108,10 @@ const commands = [
     .setDescription("プランモードを有効にします")
     .toJSON(),
   new SlashCommandBuilder()
+    .setName("active-threads")
+    .setDescription("現在アクティブな作業スレッドを確認します")
+    .toJSON(),
+  new SlashCommandBuilder()
     .setName("close")
     .setDescription("現在のスレッドをクローズします")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageThreads)
@@ -200,6 +205,11 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     return;
   }
 
+  if (commandName === "active-threads") {
+    await handleActiveThreads(interaction);
+    return;
+  }
+
   if (commandName === "close") {
     if (!interaction.channel || !interaction.channel.isThread()) {
       await interaction.reply("このコマンドはスレッド内でのみ使用できます。");
@@ -214,6 +224,57 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     await interaction.editReply("✅ スレッドをクローズしました。");
     return;
   }
+}
+
+async function handleActiveThreads(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const threadIds = admin.getActiveThreadIds();
+  if (threadIds.length === 0) {
+    await interaction.editReply("アクティブな作業スレッドはありません。");
+    return;
+  }
+
+  const sentThreads: string[] = [];
+  const failedThreads: string[] = [];
+  const mention = interaction.user.toString();
+
+  for (const threadId of threadIds) {
+    try {
+      const channel = await interaction.client.channels.fetch(threadId);
+      if (!channel || !channel.isThread()) {
+        failedThreads.push(`${threadId}: スレッドを取得できませんでした`);
+        continue;
+      }
+      if (channel.archived) {
+        failedThreads.push(`${channel.name}: アーカイブ済みです`);
+        continue;
+      }
+
+      await channel.send({
+        content: `${mention} active thread check`,
+        allowedMentions: { users: [interaction.user.id] },
+        flags: MessageFlags.SuppressNotifications,
+      });
+      sentThreads.push(channel.name);
+    } catch (error) {
+      failedThreads.push(`${threadId}: ${(error as Error).message}`);
+    }
+  }
+
+  const lines = [
+    `アクティブな作業スレッド: ${threadIds.length} 件`,
+    `silent mention 送信済み: ${sentThreads.length} 件`,
+  ];
+  if (failedThreads.length > 0) {
+    lines.push(`送信失敗: ${failedThreads.length} 件`);
+    lines.push(...failedThreads.slice(0, 10));
+    if (failedThreads.length > 10) {
+      lines.push(`...他 ${failedThreads.length - 10} 件`);
+    }
+  }
+
+  await interaction.editReply(lines.join("\n"));
 }
 
 async function handleStart(interaction: ChatInputCommandInteraction) {
@@ -319,7 +380,7 @@ client.on(Events.MessageCreate, async (message) => {
     for (const chunk of chunkDiscordContent(content)) {
       const sent = await message.channel.send({
         content: chunk,
-        flags: 4096,
+        flags: MessageFlags.SuppressNotifications,
       });
       lastProgressMessageUrl = sent.url;
     }
