@@ -441,6 +441,8 @@ export class Worker implements IWorker {
         }USD)`,
       );
       lines.push(`※ 1 USD = ${USD_TO_JPY_RATE} JPY の固定レートで換算`);
+    } else {
+      lines.push("料金： 取得不可（この応答に cost_usd が含まれていません）");
     }
     lines.push("```");
     return lines.join("\n");

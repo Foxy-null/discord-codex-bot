@@ -25,8 +25,13 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function asNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
+    const normalized = value.trim().replaceAll(",", "");
+    const direct = Number(normalized);
+    if (Number.isFinite(direct)) return direct;
+    const match = normalized.match(/-?\d+(?:\.\d+)?/);
+    if (!match) return undefined;
+    const extracted = Number(match[0]);
+    return Number.isFinite(extracted) ? extracted : undefined;
   }
   return undefined;
 }
@@ -49,6 +54,8 @@ function extractUsageFromJson(
   const response = asRecord(json.response);
   const usage = asRecord(json.usage) ?? asRecord(response?.usage);
   if (!usage) return undefined;
+  const usageCost = asRecord(usage.cost);
+  const responseCost = asRecord(response?.cost);
 
   const inputTokens = firstNumber(usage, [
     "input_tokens",
@@ -71,7 +78,21 @@ function extractUsageFromJson(
     "total_cost_usd",
     "cost_usd",
     "price_usd",
-  ]);
+    "total_cost",
+    "cost",
+  ]) ??
+    firstNumber(usageCost, [
+      "usd",
+      "total_usd",
+      "value",
+      "amount",
+    ]) ??
+    firstNumber(responseCost, [
+      "usd",
+      "total_usd",
+      "value",
+      "amount",
+    ]);
 
   if (
     inputTokens === 0 && processingTokens === 0 && outputTokens === 0 &&

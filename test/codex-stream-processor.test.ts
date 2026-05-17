@@ -118,3 +118,27 @@ Deno.test("CodexStreamProcessor: turn.completedのusageを抽出できる", () =
     costUsd: 0.00123,
   });
 });
+
+Deno.test("CodexStreamProcessor: 文字列/ネスト形式のcostを抽出できる", () => {
+  const processor = new CodexStreamProcessor();
+  const parsed = processor.parseLine(JSON.stringify({
+    type: "turn.completed",
+    response: {
+      usage: {
+        input_tokens: 10,
+        output_tokens: 5,
+        cost: {
+          usd: "$0.012345 USD",
+        },
+      },
+    },
+  }));
+
+  assertEquals(parsed.usage, {
+    inputTokens: 10,
+    processingTokens: 0,
+    outputTokens: 5,
+    totalTokens: undefined,
+    costUsd: 0.012345,
+  });
+});
