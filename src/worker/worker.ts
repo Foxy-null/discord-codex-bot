@@ -73,6 +73,19 @@ function resolveUsageCost(usage: ParsedUsage): ResolvedCost | null {
   };
 }
 
+function mergeUsageSnapshot(
+  previous: ParsedUsage | undefined,
+  next: ParsedUsage,
+): ParsedUsage {
+  if (!previous) return next;
+  return {
+    ...next,
+    totalTokens: next.totalTokens ?? previous.totalTokens,
+    costUsd: next.costUsd ?? previous.costUsd,
+    model: next.model ?? previous.model,
+  };
+}
+
 function formatUsdToJpyLine(label: string, usd: number): string {
   const costJpy = Math.round(usd * USD_TO_JPY_RATE);
   return `${label}： ¥${costJpy.toLocaleString("ja-JP")} JPY ($${
@@ -146,7 +159,7 @@ export class Worker implements IWorker {
           rateLimitTimestamp = parsed.rateLimitTimestamp;
         }
         if (parsed.usage) {
-          latestUsage = parsed.usage;
+          latestUsage = mergeUsageSnapshot(latestUsage, parsed.usage);
         }
 
         if (parsed.sessionId) {
@@ -203,7 +216,7 @@ export class Worker implements IWorker {
           rateLimitTimestamp = parsed.rateLimitTimestamp;
         }
         if (parsed.usage) {
-          latestUsage = parsed.usage;
+          latestUsage = mergeUsageSnapshot(latestUsage, parsed.usage);
         }
       }
 
