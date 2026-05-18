@@ -47,6 +47,11 @@ export interface WorkerState {
   createdAt: string;
   lastActiveAt: string;
   isPlanMode?: boolean;
+  threadTokenTotals?: {
+    inputTokens: number;
+    processingTokens: number;
+    outputTokens: number;
+  };
 }
 
 interface WorkspaceConfig {
@@ -283,6 +288,13 @@ export class WorkspaceManager {
       );
       const parsed = JSON.parse(raw) as WorkerState;
       if (!parsed.status) parsed.status = "active";
+      if (!parsed.threadTokenTotals) {
+        parsed.threadTokenTotals = {
+          inputTokens: 0,
+          processingTokens: 0,
+          outputTokens: 0,
+        };
+      }
       return parsed;
     } catch (error) {
       if (error instanceof Deno.errors.NotFound) {

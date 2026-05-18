@@ -25,6 +25,11 @@ import type { IWorker, WorkerError } from "./types.ts";
 const DIAGNOSTIC_SECTION_LIMIT = 1800;
 const DIAGNOSTIC_TEXT_LIMIT = 5000;
 const USD_TO_JPY_RATE = 160;
+const ZERO_TOKEN_TOTALS = {
+  inputTokens: 0,
+  processingTokens: 0,
+  outputTokens: 0,
+};
 
 function redactSensitiveText(text: string): string {
   return text
@@ -238,10 +243,21 @@ export class Worker implements IWorker {
         finalResult = await this.readOutputLastMessage(outputLastMessagePath);
       }
 
+      if (latestUsage) {
+        const totals = this.state.threadTokenTotals ?? { ...ZERO_TOKEN_TOTALS };
+        totals.inputTokens += latestUsage.inputTokens;
+        totals.processingTokens += latestUsage.processingTokens;
+        totals.outputTokens += latestUsage.outputTokens;
+        this.state.threadTokenTotals = totals;
+      }
+
       await this.saveRawCodexOutput(allOutput, this.state.sessionId);
       await this.save();
 
-      const usageSummary = this.formatUsageSummary(latestUsage);
+      const usageSummary = this.formatUsageSummary(
+        latestUsage,
+        this.state.threadTokenTotals,
+      );
       const responseText = finalResult.trim() || MESSAGES.NO_FINAL_RESPONSE;
       return ok(
         this.formatter.formatResponse(
@@ -423,7 +439,14 @@ export class Worker implements IWorker {
     return "";
   }
 
-  private formatUsageSummary(usage?: ParsedUsage): string {
+  private formatUsageSummary(
+    usage?: ParsedUsage,
+    threadTotals?: {
+      inputTokens: number;
+      processingTokens: number;
+      outputTokens: number;
+    },
+  ): string {
     if (!usage) return "";
 
     const lines = [
@@ -443,6 +466,13 @@ export class Worker implements IWorker {
       lines.push(`※ 1 USD = ${USD_TO_JPY_RATE} JPY の固定レートで換算`);
     } else {
       lines.push("料金： 取得不可（この応答に cost_usd が含まれていません）");
+    }
+    if (threadTotals) {
+      const total = threadTotals.inputTokens + threadTotals.processingTokens +
+        threadTotals.outputTokens;
+      lines.push(
+        `スレッド累計トークン: 入力 ${threadTotals.inputTokens} / 処理 ${threadTotals.processingTokens} / 出力 ${threadTotals.outputTokens} (合計 ${total})`,
+      );
     }
     lines.push("```");
     return lines.join("\n");
