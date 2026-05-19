@@ -14,7 +14,7 @@ export function formatStartCommandErrorForUser(error: unknown): string | null {
 
   const code = error.code;
   if (code === 50001) {
-    return "チャンネルへのアクセス権限が足りません。Bot にこのチャンネルを閲覧・送信できる権限を付与してください。";
+    return "Bot の権限が足りません。このチャンネルへのアクセス、メッセージ送信、スレッドの作成・送信権限が付与されているか確認してください。";
   }
 
   if (code === 50013) {
