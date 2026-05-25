@@ -152,12 +152,36 @@ async function sendThreadMessage(
   return sent;
 }
 
-async function replyToThreadMessage(message: Message, content: string) {
-  const sent = await message.reply(content);
+async function replyToThreadMessage(
+  message: Message,
+  payload: Parameters<Message["reply"]>[0],
+) {
+  const sent = await message.reply(payload);
   if (message.channel.isThread()) {
-    logThreadSend(message.channel as ThreadChannel, content);
+    logThreadSend(
+      message.channel as ThreadChannel,
+      getThreadSendContent(payload as Parameters<ThreadChannel["send"]>[0]),
+    );
   }
   return sent;
+}
+
+async function buildThreadCostEmbed(
+  threadId: string,
+  threadName: string,
+  highlightTaskId?: string,
+) {
+  const { entries, summary } = await taskCostLedger.summarizeThread(threadId);
+  const latestTask = highlightTaskId
+    ? entries.find((entry) => entry.taskId === highlightTaskId) ??
+      summary.latestTask
+    : summary.latestTask;
+  return buildTaskCostEmbed({
+    threadName,
+    summary,
+    latestTask,
+    refreshedAt: new Date().toISOString(),
+  });
 }
 
 async function updateThreadCostEmbed(
@@ -175,17 +199,11 @@ async function updateThreadCostEmbed(
   }
 
   const thread = channel as ThreadChannel;
-  const { entries, summary } = await taskCostLedger.summarizeThread(threadId);
-  const latestTask = highlightTaskId
-    ? entries.find((entry) => entry.taskId === highlightTaskId) ??
-      summary.latestTask
-    : summary.latestTask;
-  const embed = buildTaskCostEmbed({
-    threadName: thread.name,
-    summary,
-    latestTask,
-    refreshedAt: new Date().toISOString(),
-  });
+  const embed = await buildThreadCostEmbed(
+    threadId,
+    thread.name,
+    highlightTaskId,
+  );
 
   try {
     const message = await thread.messages.fetch(
@@ -748,7 +766,15 @@ client.on(Events.MessageCreate, async (message) => {
       : finalReply;
     const chunks = chunkDiscordContent(replyWithStatus);
     if (chunks.length === 0) return;
-    await replyToThreadMessage(message, chunks[0]);
+    const taskCostEmbed = await buildThreadCostEmbed(
+      threadId,
+      thread.name,
+      taskEntry.taskId,
+    );
+    await replyToThreadMessage(message, {
+      content: chunks[0],
+      embeds: [taskCostEmbed],
+    });
     for (const chunk of chunks.slice(1)) {
       await sendThreadMessage(thread, chunk);
     }
