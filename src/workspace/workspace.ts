@@ -15,9 +15,23 @@ export interface ThreadInfo {
   worktreePath: string | null;
   firstUserMessageReceivedAt?: string | null;
   autoRenamedByFirstMessage?: boolean;
+  welcomeEmbedMessageId?: string | null;
   createdAt: string;
   lastActiveAt: string;
   status: "active" | "inactive" | "archived";
+}
+
+export type TaskCostStatus = "pending" | "ready" | "failed";
+
+export interface TaskCostEntry {
+  taskId: string;
+  taskStartedAt: string;
+  taskFinishedAt?: string | null;
+  costStatus: TaskCostStatus;
+  costUsd?: number | null;
+  costJpy?: number | null;
+  costFetchedAt?: string | null;
+  costError?: string | null;
 }
 
 export interface AuditEntry {
@@ -54,6 +68,7 @@ interface WorkspaceConfig {
   repositoriesDir: string;
   worktreesDir: string;
   threadsDir: string;
+  taskCostsDir: string;
   workersDir: string;
   adminDir: string;
   sessionsDir: string;
@@ -72,6 +87,7 @@ export class WorkspaceManager {
       repositoriesDir: join(resolvedBaseDir, "repositories"),
       worktreesDir: join(resolvedBaseDir, "worktrees"),
       threadsDir: join(resolvedBaseDir, "threads"),
+      taskCostsDir: join(resolvedBaseDir, "task-costs"),
       workersDir: join(resolvedBaseDir, "workers"),
       adminDir: join(resolvedBaseDir, "admin"),
       sessionsDir: join(resolvedBaseDir, "sessions"),
@@ -85,6 +101,7 @@ export class WorkspaceManager {
     await ensureDir(this.config.repositoriesDir);
     await ensureDir(this.config.worktreesDir);
     await ensureDir(this.config.threadsDir);
+    await ensureDir(this.config.taskCostsDir);
     await ensureDir(this.config.workersDir);
     await ensureDir(this.config.adminDir);
     await ensureDir(this.config.sessionsDir);
@@ -115,6 +132,14 @@ export class WorkspaceManager {
 
   getTempDir(): string {
     return this.config.tempDir;
+  }
+
+  getTaskCostsDir(threadId: string): string {
+    return join(this.config.taskCostsDir, threadId);
+  }
+
+  private getTaskCostPath(threadId: string, taskId: string): string {
+    return join(this.getTaskCostsDir(threadId), `${taskId}.json`);
   }
 
   async createTempFile(options: {
@@ -241,6 +266,9 @@ export class WorkspaceManager {
       if (parsed.autoRenamedByFirstMessage === undefined) {
         parsed.autoRenamedByFirstMessage = false;
       }
+      if (parsed.welcomeEmbedMessageId === undefined) {
+        parsed.welcomeEmbedMessageId = null;
+      }
       return parsed;
     } catch (error) {
       if (error instanceof Deno.errors.NotFound) {
@@ -266,6 +294,57 @@ export class WorkspaceManager {
       if (info) infos.push(info);
     }
     return infos.sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt));
+  }
+
+  async saveTaskCostEntry(
+    threadId: string,
+    taskCostEntry: TaskCostEntry,
+  ): Promise<void> {
+    const dir = this.getTaskCostsDir(threadId);
+    await ensureDir(dir);
+    await Deno.writeTextFile(
+      this.getTaskCostPath(threadId, taskCostEntry.taskId),
+      JSON.stringify(taskCostEntry, null, 2),
+    );
+  }
+
+  async loadTaskCostEntry(
+    threadId: string,
+    taskId: string,
+  ): Promise<TaskCostEntry | null> {
+    try {
+      const raw = await Deno.readTextFile(
+        this.getTaskCostPath(threadId, taskId),
+      );
+      return JSON.parse(raw) as TaskCostEntry;
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async loadTaskCostEntries(threadId: string): Promise<TaskCostEntry[]> {
+    const dir = this.getTaskCostsDir(threadId);
+    const entries: TaskCostEntry[] = [];
+    try {
+      for await (const file of Deno.readDir(dir)) {
+        if (!file.isFile || !file.name.endsWith(".json")) continue;
+        const taskId = file.name.replace(/\.json$/, "");
+        const entry = await this.loadTaskCostEntry(threadId, taskId);
+        if (entry) {
+          entries.push(entry);
+        }
+      }
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) {
+        throw error;
+      }
+    }
+    return entries.sort((a, b) =>
+      a.taskStartedAt.localeCompare(b.taskStartedAt)
+    );
   }
 
   async saveWorkerState(workerState: WorkerState): Promise<void> {

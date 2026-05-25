@@ -61,11 +61,42 @@ Deno.test(
       assertExists(loaded);
       assertEquals(loaded?.firstUserMessageReceivedAt, null);
       assertEquals(loaded?.autoRenamedByFirstMessage, false);
+      assertEquals(loaded?.welcomeEmbedMessageId, null);
     } finally {
       await Deno.remove(baseDir, { recursive: true });
     }
   },
 );
+
+Deno.test("WorkspaceManager: task cost entry を個別ファイルで保存・読み込みできる", async () => {
+  const baseDir = await createTestDir("workspace_test_");
+  try {
+    const manager = new WorkspaceManager(baseDir);
+    await manager.initialize();
+
+    await manager.saveTaskCostEntry("thread-1", {
+      taskId: "task-1",
+      taskStartedAt: "2026-05-25T00:00:00.000Z",
+      taskFinishedAt: "2026-05-25T00:01:00.000Z",
+      costStatus: "ready",
+      costUsd: 1.25,
+      costJpy: 200,
+      costFetchedAt: "2026-05-25T00:02:00.000Z",
+      costError: null,
+    });
+
+    const loaded = await manager.loadTaskCostEntry("thread-1", "task-1");
+    assertExists(loaded);
+    assertEquals(loaded?.taskId, "task-1");
+    assertEquals(loaded?.costStatus, "ready");
+
+    const entries = await manager.loadTaskCostEntries("thread-1");
+    assertEquals(entries.length, 1);
+    assertEquals(entries[0].taskId, "task-1");
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
 
 Deno.test("WorkspaceManager: 添付ファイルをメッセージ単位で保存できる", async () => {
   const baseDir = await createTestDir("workspace_test_");

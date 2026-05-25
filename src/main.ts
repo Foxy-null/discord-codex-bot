@@ -36,6 +36,8 @@ import {
   formatSystemCheckResults,
 } from "./system-check.ts";
 import { generateThreadNameWithCodex } from "./thread-namer.ts";
+import { buildTaskCostEmbed } from "./task-cost-embed.ts";
+import { OpenAiCostsClient, TaskCostLedger } from "./task-costs.ts";
 import { formatDiscordSendLog } from "./utils/discord-log.ts";
 import { splitIntoDiscordChunks } from "./utils/discord-message.ts";
 import { WorkspaceManager } from "./workspace/workspace.ts";
@@ -115,6 +117,19 @@ function getThreadSendContent(payload: Parameters<ThreadChannel["send"]>[0]) {
   ) {
     return payload.content;
   }
+  if (
+    payload && typeof payload === "object" && "embeds" in payload &&
+    Array.isArray(payload.embeds) && payload.embeds.length > 0
+  ) {
+    const embed = payload.embeds[0];
+    if (
+      embed && typeof embed === "object" && "title" in embed &&
+      typeof embed.title === "string" && embed.title.trim()
+    ) {
+      return `[embed] ${embed.title}`;
+    }
+    return "[embed]";
+  }
   return "";
 }
 
@@ -145,6 +160,71 @@ async function replyToThreadMessage(message: Message, content: string) {
   return sent;
 }
 
+async function updateThreadCostEmbed(
+  threadId: string,
+  highlightTaskId?: string,
+) {
+  const threadInfo = await workspaceManager.loadThreadInfo(threadId);
+  if (!threadInfo?.welcomeEmbedMessageId) {
+    return;
+  }
+
+  const channel = await client.channels.fetch(threadId);
+  if (!channel || !channel.isThread()) {
+    return;
+  }
+
+  const thread = channel as ThreadChannel;
+  const { entries, summary } = await taskCostLedger.summarizeThread(threadId);
+  const latestTask = highlightTaskId
+    ? entries.find((entry) => entry.taskId === highlightTaskId) ??
+      summary.latestTask
+    : summary.latestTask;
+  const embed = buildTaskCostEmbed({
+    threadName: thread.name,
+    summary,
+    latestTask,
+    refreshedAt: new Date().toISOString(),
+  });
+
+  try {
+    const message = await thread.messages.fetch(
+      threadInfo.welcomeEmbedMessageId,
+    );
+    await message.edit({ embeds: [embed] });
+  } catch {
+    const sent = await sendThreadMessage(thread, { embeds: [embed] });
+    threadInfo.welcomeEmbedMessageId = sent.id;
+    await workspaceManager.saveThreadInfo(threadInfo);
+  }
+}
+
+async function refreshPendingTaskCostsAndEmbeds() {
+  const threadInfos = await workspaceManager.getAllThreadInfos();
+  for (const threadInfo of threadInfos) {
+    try {
+      if (threadInfo.status === "archived") continue;
+      const updatedEntries = await taskCostLedger.refreshPendingTasks(
+        threadInfo.threadId,
+      );
+      if (updatedEntries.length === 0) continue;
+      const latestUpdated = updatedEntries[updatedEntries.length - 1];
+      await updateThreadCostEmbed(
+        threadInfo.threadId,
+        latestUpdated?.taskId,
+      ).catch((error) => {
+        console.error("[TaskCost] embed refresh failed", error);
+      });
+    } catch (error) {
+      console.error(
+        "[TaskCost] thread refresh failed",
+        threadInfo.threadId,
+        error,
+      );
+    }
+  }
+}
+
 const DEFAULT_THREAD_NAME_PATTERN = /^[\w.-]+\/[\w.-]+-\d+$/;
 
 console.log("システム要件をチェックしています...");
@@ -167,6 +247,10 @@ const env = envResult.value;
 
 const workspaceManager = new WorkspaceManager(env.WORK_BASE_DIR);
 await workspaceManager.initialize();
+const taskCostLedger = new TaskCostLedger(
+  workspaceManager,
+  env.OPENAI_ADMIN_KEY ? new OpenAiCostsClient(env.OPENAI_ADMIN_KEY) : null,
+);
 
 const adminState = await workspaceManager.loadAdminState();
 const admin = Admin.fromState(
@@ -235,6 +319,15 @@ client.once(Events.ClientReady, async (readyClient) => {
     body: commands,
   });
   console.log("スラッシュコマンド登録完了");
+
+  await refreshPendingTaskCostsAndEmbeds().catch((error) => {
+    console.error("[TaskCost] initial refresh failed", error);
+  });
+  setInterval(() => {
+    refreshPendingTaskCostsAndEmbeds().catch((error) => {
+      console.error("[TaskCost] scheduled refresh failed", error);
+    });
+  }, 10 * 60 * 1000);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -489,6 +582,23 @@ async function handleStart(interaction: ChatInputCommandInteraction) {
     thread,
     `こんにちは！ 準備バッチリだよ！ ${repository.fullName} について何でも聞いてね～！`,
   );
+
+  const initialSummary = await taskCostLedger.summarizeThread(thread.id);
+  const initialEmbed = buildTaskCostEmbed({
+    threadName: thread.name,
+    summary: initialSummary.summary,
+    latestTask: initialSummary.summary.latestTask,
+    refreshedAt: new Date().toISOString(),
+  });
+  const embedMessage = await sendThreadMessage(thread, {
+    embeds: [initialEmbed],
+  });
+
+  const threadInfo = await workspaceManager.loadThreadInfo(thread.id);
+  if (threadInfo) {
+    threadInfo.welcomeEmbedMessageId = embedMessage.id;
+    await workspaceManager.saveThreadInfo(threadInfo);
+  }
 }
 
 client.on(Events.ThreadUpdate, async (oldThread, newThread) => {
@@ -535,98 +645,115 @@ client.on(Events.MessageCreate, async (message) => {
     console.error("[ThreadRename] first-message rename failed", error);
   }
 
-  let lastProgressMessageUrl: string | null = null;
-  const onProgress = async (content: string) => {
-    for (const chunk of chunkDiscordContent(content)) {
-      const sent = await sendThreadMessage(thread, {
-        content: chunk,
-        flags: MessageFlags.SuppressNotifications,
-      });
-      lastProgressMessageUrl = sent.url;
-    }
-  };
+  try {
+    let lastProgressMessageUrl: string | null = null;
+    const onProgress = async (content: string) => {
+      for (const chunk of chunkDiscordContent(content)) {
+        const sent = await sendThreadMessage(thread, {
+          content: chunk,
+          flags: MessageFlags.SuppressNotifications,
+        });
+        lastProgressMessageUrl = sent.url;
+      }
+    };
 
-  const onReaction = async (emoji: string) => {
-    await message.react(emoji).catch(() => {});
-  };
+    const onReaction = async (emoji: string) => {
+      await message.react(emoji).catch(() => {});
+    };
 
-  const startStatus = await refreshCodexStatus(Deno.cwd());
+    const startStatus = await refreshCodexStatus(Deno.cwd());
 
-  const attachmentInputs = getAttachmentDownloadInputs(message);
-  let savedAttachments: SavedAttachment[] = [];
-  if (attachmentInputs.length > 0) {
-    await onProgress(
-      `📎 添付ファイル ${attachmentInputs.length} 件を保存しています...`,
-    );
-    try {
-      savedAttachments = await workspaceManager.saveMessageAttachments(
-        threadId,
-        message.id,
-        attachmentInputs,
+    const attachmentInputs = getAttachmentDownloadInputs(message);
+    let savedAttachments: SavedAttachment[] = [];
+    if (attachmentInputs.length > 0) {
+      await onProgress(
+        `📎 添付ファイル ${attachmentInputs.length} 件を保存しています...`,
       );
-      await onReaction("📎");
-    } catch (error) {
-      await sendThreadMessage(
-        thread,
-        `添付ファイルの保存に失敗しました: ${(error as Error).message}`,
-      );
-      return;
-    }
-  }
-
-  const result = await admin.routeMessage(
-    threadId,
-    message.content,
-    savedAttachments,
-    onProgress,
-    onReaction,
-  );
-
-  if (result.isErr()) {
-    if (result.error.type === "WORKER_NOT_FOUND") {
-      const threadInfo = await workspaceManager.loadThreadInfo(threadId);
-      if (threadInfo) {
+      try {
+        savedAttachments = await workspaceManager.saveMessageAttachments(
+          threadId,
+          message.id,
+          attachmentInputs,
+        );
+        await onReaction("📎");
+      } catch (error) {
         await sendThreadMessage(
           thread,
-          "このスレッドはアクティブではありません。/start で新規に開始してください。",
+          `添付ファイルの保存に失敗しました: ${(error as Error).message}`,
         );
+        return;
+      }
+    }
+
+    const taskEntry = await taskCostLedger.startTask(threadId);
+    const result = await (async () => {
+      try {
+        return await admin.routeMessage(
+          threadId,
+          message.content,
+          savedAttachments,
+          onProgress,
+          onReaction,
+        );
+      } finally {
+        await taskCostLedger.finishTask(threadId, taskEntry.taskId);
+        await taskCostLedger.refreshTaskCost(threadId, taskEntry.taskId);
+        await updateThreadCostEmbed(threadId, taskEntry.taskId).catch(
+          (error) => {
+            console.error("[TaskCost] embed update failed", error);
+          },
+        );
+      }
+    })();
+
+    if (result.isErr()) {
+      if (result.error.type === "WORKER_NOT_FOUND") {
+        const threadInfo = await workspaceManager.loadThreadInfo(threadId);
+        if (threadInfo) {
+          await sendThreadMessage(
+            thread,
+            "このスレッドはアクティブではありません。/start で新規に開始してください。",
+          );
+        }
+        return;
+      }
+      if (result.error.type === "RATE_LIMIT") {
+        await sendThreadMessage(thread, admin.createRateLimitMessage());
+        return;
+      }
+      for (
+        const chunk of chunkDiscordContent(
+          formatAdminErrorForDiscord(result.error),
+        )
+      ) {
+        await sendThreadMessage(thread, {
+          content: chunk,
+          flags: MessageFlags.SuppressNotifications,
+        });
       }
       return;
     }
-    if (result.error.type === "RATE_LIMIT") {
-      await sendThreadMessage(thread, admin.createRateLimitMessage());
-      return;
-    }
-    for (
-      const chunk of chunkDiscordContent(
-        formatAdminErrorForDiscord(result.error),
-      )
-    ) {
-      await sendThreadMessage(thread, {
-        content: chunk,
-        flags: MessageFlags.SuppressNotifications,
-      });
-    }
-    return;
-  }
 
-  const reply = result.value;
-  const replyContent = typeof reply === "string" ? reply : reply.content;
-  const endStatus = await refreshCodexStatus(Deno.cwd());
-  const finalReply = replyContent.trim() === MESSAGES.NO_FINAL_RESPONSE &&
-      lastProgressMessageUrl
-    ? `Codexの最終テキストを取得できなかったため、直近の出力を参照してください。\n> ${lastProgressMessageUrl}`
-    : replyContent;
-  const replyWithStatus = startStatus && endStatus
-    ? `${finalReply}\n\`\`\`kotlin\n${
-      formatCodexStatusDelta(startStatus, endStatus)
-    }\n\`\`\``
-    : finalReply;
-  const chunks = chunkDiscordContent(replyWithStatus);
-  if (chunks.length === 0) return;
-  await replyToThreadMessage(message, chunks[0]);
-  for (const chunk of chunks.slice(1)) {
-    await sendThreadMessage(thread, chunk);
+    const reply = result.value;
+    const replyContent = typeof reply === "string" ? reply : reply.content;
+    const endStatus = await refreshCodexStatus(Deno.cwd());
+    const finalReply = replyContent.trim() === MESSAGES.NO_FINAL_RESPONSE &&
+        lastProgressMessageUrl
+      ? `Codexの最終テキストを取得できなかったため、直近の出力を参照してください。\n> ${lastProgressMessageUrl}`
+      : replyContent;
+    const replyWithStatus = startStatus && endStatus
+      ? `${finalReply}\n\`\`\`kotlin\n${
+        formatCodexStatusDelta(startStatus, endStatus)
+      }\n\`\`\``
+      : finalReply;
+    const chunks = chunkDiscordContent(replyWithStatus);
+    if (chunks.length === 0) return;
+    await replyToThreadMessage(message, chunks[0]);
+    for (const chunk of chunks.slice(1)) {
+      await sendThreadMessage(thread, chunk);
+    }
+  } catch (error) {
+    console.error("[MessageCreate] handler failed", error);
   }
 });
 

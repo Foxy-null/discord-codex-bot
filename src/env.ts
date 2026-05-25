@@ -5,6 +5,7 @@ export interface Env {
   WORK_BASE_DIR: string;
   CODEX_APPEND_SYSTEM_PROMPT?: string;
   CODEX_STATUS_TIME_ZONE?: string;
+  OPENAI_ADMIN_KEY?: string;
 }
 
 /**
@@ -38,6 +39,7 @@ export function getEnv(): Result<Env, EnvError> {
   const workBaseDir = Deno.env.get("WORK_BASE_DIR");
   const codexAppendSystemPrompt = Deno.env.get("CODEX_APPEND_SYSTEM_PROMPT");
   const codexStatusTimeZone = Deno.env.get("CODEX_STATUS_TIME_ZONE");
+  const openAiAdminKey = Deno.env.get("OPENAI_ADMIN_KEY");
 
   if (!token) {
     return err({
@@ -65,5 +67,6 @@ export function getEnv(): Result<Env, EnvError> {
     WORK_BASE_DIR: expandedWorkBaseDir.value,
     CODEX_APPEND_SYSTEM_PROMPT: codexAppendSystemPrompt,
     CODEX_STATUS_TIME_ZONE: codexStatusTimeZone,
+    OPENAI_ADMIN_KEY: openAiAdminKey,
   });
 }
