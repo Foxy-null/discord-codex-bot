@@ -1,6 +1,7 @@
 import { err, ok, Result } from "neverthrow";
 import type { SavedAttachment } from "../attachments.ts";
 import type { WorkerError } from "../worker/types.ts";
+import type { WorkerMessageResult } from "../worker/types.ts";
 import type { DiscordMessage } from "./types.ts";
 import { WorkerManager } from "./worker-manager.ts";
 
@@ -42,7 +43,9 @@ export class MessageRouter {
     attachments: readonly SavedAttachment[] = [],
     onProgress?: (content: string) => Promise<void>,
     onReaction?: (emoji: string) => Promise<void>,
-  ): Promise<Result<string | DiscordMessage, MessageRouterError>> {
+  ): Promise<
+    Result<string | WorkerMessageResult | DiscordMessage, MessageRouterError>
+  > {
     const worker = this.workerManager.getWorker(threadId);
     if (!worker) {
       return err({ type: "WORKER_NOT_FOUND", threadId });

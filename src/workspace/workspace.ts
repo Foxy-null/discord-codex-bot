@@ -23,11 +23,19 @@ export interface ThreadInfo {
 
 export type TaskCostStatus = "pending" | "ready" | "failed";
 
+export interface TaskTokenUsage {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens?: number | null;
+}
+
 export interface TaskCostEntry {
   taskId: string;
   taskStartedAt: string;
   taskFinishedAt?: string | null;
   costStatus: TaskCostStatus;
+  tokenUsage?: TaskTokenUsage | null;
   costUsd?: number | null;
   costJpy?: number | null;
   costFetchedAt?: string | null;

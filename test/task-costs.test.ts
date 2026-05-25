@@ -17,6 +17,12 @@ Deno.test("Task costs: ready な台帳だけを集計できる", () => {
       ...createTaskCostEntry("task-1"),
       taskFinishedAt: "2026-05-25T00:01:00.000Z",
       costStatus: "ready" as const,
+      tokenUsage: {
+        inputTokens: 100,
+        cachedInputTokens: 20,
+        outputTokens: 30,
+        reasoningOutputTokens: 10,
+      },
       costUsd: 1.25,
       costJpy: 200,
     },
@@ -30,6 +36,11 @@ Deno.test("Task costs: ready な台帳だけを集計できる", () => {
   const summary = summarizeTaskCosts(entries);
   assertEquals(summary.totalUsd, 1.25);
   assertEquals(summary.totalJpy, 200);
+  assertEquals(summary.inputTokens, 100);
+  assertEquals(summary.cachedInputTokens, 20);
+  assertEquals(summary.outputTokens, 30);
+  assertEquals(summary.reasoningOutputTokens, 10);
+  assertEquals(summary.totalTokens, 140);
   assertEquals(summary.readyCount, 1);
   assertEquals(summary.pendingCount, 1);
 });

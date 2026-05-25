@@ -105,7 +105,7 @@ Deno.test("Worker: 最終応答候補のagent_messageも進捗として送信す
     );
 
     assertEquals(result.isOk(), true);
-    assertEquals(result._unsafeUnwrap(), "最終返信です。");
+    assertEquals(result._unsafeUnwrap().content, "最終返信です。");
     assertEquals(progress.includes("途中ログです。"), true);
     assertEquals(progress.includes("最終返信です。"), true);
   } finally {
@@ -205,7 +205,10 @@ Deno.test("Worker: TMPDIRが壊れていてもWORK_BASE_DIRの一時ファイル
     const result = await worker.processMessage("依頼");
 
     assertEquals(result.isOk(), true);
-    assertEquals(result._unsafeUnwrap(), "ファイル由来の最終返信です。");
+    assertEquals(
+      result._unsafeUnwrap().content,
+      "ファイル由来の最終返信です。",
+    );
 
     const args = executor.executedArgs[0];
     const outputPath = args[args.indexOf("--output-last-message") + 1];

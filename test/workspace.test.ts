@@ -79,6 +79,12 @@ Deno.test("WorkspaceManager: task cost entry を個別ファイルで保存・�
       taskStartedAt: "2026-05-25T00:00:00.000Z",
       taskFinishedAt: "2026-05-25T00:01:00.000Z",
       costStatus: "ready",
+      tokenUsage: {
+        inputTokens: 120,
+        cachedInputTokens: 20,
+        outputTokens: 30,
+        reasoningOutputTokens: 10,
+      },
       costUsd: 1.25,
       costJpy: 200,
       costFetchedAt: "2026-05-25T00:02:00.000Z",
@@ -89,6 +95,7 @@ Deno.test("WorkspaceManager: task cost entry を個別ファイルで保存・�
     assertExists(loaded);
     assertEquals(loaded?.taskId, "task-1");
     assertEquals(loaded?.costStatus, "ready");
+    assertEquals(loaded?.tokenUsage?.inputTokens, 120);
 
     const entries = await manager.loadTaskCostEntries("thread-1");
     assertEquals(entries.length, 1);

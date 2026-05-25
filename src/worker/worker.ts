@@ -19,7 +19,7 @@ import {
 import { MessageFormatter } from "./message-formatter.ts";
 import { SessionLogger } from "./session-logger.ts";
 import { WorkerConfiguration } from "./worker-configuration.ts";
-import type { IWorker, WorkerError } from "./types.ts";
+import type { IWorker, WorkerError, WorkerMessageResult } from "./types.ts";
 
 const DIAGNOSTIC_SECTION_LIMIT = 1800;
 const DIAGNOSTIC_TEXT_LIMIT = 5000;
@@ -75,7 +75,7 @@ export class Worker implements IWorker {
     attachments: readonly SavedAttachment[] = [],
     onProgress: (content: string) => Promise<void> = async () => {},
     onReaction?: (emoji: string) => Promise<void>,
-  ): Promise<Result<string, WorkerError>> {
+  ): Promise<Result<WorkerMessageResult, WorkerError>> {
     if (!this.state.repository || !this.state.worktreePath) {
       return err({ type: "REPOSITORY_NOT_SET" });
     }
@@ -96,6 +96,7 @@ export class Worker implements IWorker {
     let pendingBuffer = "";
     let outputLastMessagePath: string | null = null;
     let rateLimitTimestamp: number | undefined;
+    let usage: WorkerMessageResult["usage"] = null;
 
     const onData = (chunk: Uint8Array) => {
       const text = new TextDecoder().decode(chunk, { stream: true });
@@ -117,6 +118,10 @@ export class Worker implements IWorker {
 
         if (parsed.finalText) {
           finalResult = parsed.finalText;
+        }
+
+        if (parsed.usage) {
+          usage = parsed.usage;
         }
 
         if (parsed.text) {
@@ -163,6 +168,9 @@ export class Worker implements IWorker {
         }
         if (parsed.rateLimitTimestamp !== undefined) {
           rateLimitTimestamp = parsed.rateLimitTimestamp;
+        }
+        if (parsed.usage) {
+          usage = parsed.usage;
         }
       }
 
@@ -233,13 +241,19 @@ export class Worker implements IWorker {
       await this.save();
 
       return ok(
-        this.formatter.formatResponse(
-          finalResult.trim() || MESSAGES.NO_FINAL_RESPONSE,
-        ),
+        {
+          content: this.formatter.formatResponse(
+            finalResult.trim() || MESSAGES.NO_FINAL_RESPONSE,
+          ),
+          usage,
+        },
       );
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
-        return ok("⛔ Codex実行を中断しました。");
+        return ok({
+          content: "⛔ Codex実行を中断しました。",
+          usage,
+        });
       }
       const logPath = await this.saveRawCodexOutput(
         allOutput,

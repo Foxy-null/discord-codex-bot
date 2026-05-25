@@ -1,3 +1,5 @@
+import type { TaskTokenUsage } from "../workspace/workspace.ts";
+
 export interface ParsedCodexLine {
   raw: string;
   json?: Record<string, unknown>;
@@ -5,6 +7,7 @@ export interface ParsedCodexLine {
   finalText?: string;
   sessionId?: string;
   rateLimitTimestamp?: number;
+  usage?: TaskTokenUsage;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -58,6 +61,7 @@ export class CodexStreamProcessor {
       const sessionId = this.extractSessionId(json);
       const text = this.extractProgressText(json);
       const finalText = this.extractFinalText(json);
+      const usage = this.extractUsage(json);
 
       const rateFromText = extractRateLimitTimestamp(
         [text, finalText].filter(Boolean).join("\n"),
@@ -70,6 +74,7 @@ export class CodexStreamProcessor {
         finalText: finalText || undefined,
         sessionId,
         rateLimitTimestamp: rateFromText,
+        usage,
       };
     } catch {
       // JSONでない行は生ログとして扱う
@@ -139,5 +144,101 @@ export class CodexStreamProcessor {
     }
 
     return "";
+  }
+
+  private extractUsage(
+    json: Record<string, unknown>,
+  ): TaskTokenUsage | undefined {
+    const usage = this.findUsageRecord(json);
+    if (!usage) return undefined;
+
+    const inputTokens = this.readNumberField(
+      usage,
+      "input_tokens",
+      "inputTokens",
+    );
+    const cachedInputTokens = this.readCachedInputTokens(usage);
+    const outputTokens = this.readNumberField(
+      usage,
+      "output_tokens",
+      "outputTokens",
+    );
+    const reasoningOutputTokens = this.readNumberField(
+      usage,
+      "reasoning_output_tokens",
+      "reasoningOutputTokens",
+    ) ?? 0;
+
+    if (inputTokens === null || outputTokens === null) {
+      return undefined;
+    }
+
+    return {
+      inputTokens,
+      cachedInputTokens: cachedInputTokens ?? 0,
+      outputTokens,
+      reasoningOutputTokens,
+    };
+  }
+
+  private findUsageRecord(
+    json: Record<string, unknown>,
+  ): Record<string, unknown> | undefined {
+    const direct = asRecord(json.usage);
+    if (direct) return direct;
+
+    const response = asRecord(json.response);
+    const responseUsage = response ? asRecord(response.usage) : undefined;
+    if (responseUsage) return responseUsage;
+
+    const result = asRecord(json.result);
+    const resultUsage = result ? asRecord(result.usage) : undefined;
+    if (resultUsage) return resultUsage;
+
+    return undefined;
+  }
+
+  private readCachedInputTokens(usage: Record<string, unknown>): number | null {
+    const direct = this.readNumberField(
+      usage,
+      "cached_input_tokens",
+      "cachedInputTokens",
+      "cached_tokens",
+      "cachedTokens",
+    );
+    if (direct !== null) {
+      return direct;
+    }
+
+    const inputDetails = asRecord(usage.input_tokens_details);
+    const detail = inputDetails
+      ? this.readNumberField(
+        inputDetails,
+        "cached_tokens",
+        "cachedTokens",
+        "cached_input_tokens",
+        "cachedInputTokens",
+      )
+      : null;
+    return detail;
+  }
+
+  private readNumberField(
+    record: Record<string, unknown>,
+    ...keys: string[]
+  ): number | null {
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return value;
+      }
+      if (typeof value === "string") {
+        const parsed = Number.parseFloat(value);
+        if (Number.isFinite(parsed)) {
+          return parsed;
+        }
+      }
+    }
+    return null;
   }
 }

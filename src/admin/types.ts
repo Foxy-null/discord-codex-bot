@@ -1,4 +1,5 @@
 import type { SavedAttachment } from "../attachments.ts";
+import type { WorkerMessageResult } from "../worker/types.ts";
 
 export type AdminError =
   | { type: "WORKER_NOT_FOUND"; threadId: string }
@@ -23,6 +24,11 @@ export interface IAdmin {
     attachments?: readonly SavedAttachment[],
     onProgress?: (content: string) => Promise<void>,
     onReaction?: (emoji: string) => Promise<void>,
-  ): Promise<import("neverthrow").Result<string | DiscordMessage, AdminError>>;
+  ): Promise<
+    import("neverthrow").Result<
+      string | WorkerMessageResult | DiscordMessage,
+      AdminError
+    >
+  >;
   getActiveThreadIds(): string[];
 }

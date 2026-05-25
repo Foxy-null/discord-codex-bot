@@ -1,4 +1,10 @@
 import type { SavedAttachment } from "../attachments.ts";
+import type { TaskTokenUsage } from "../workspace/workspace.ts";
+
+export interface WorkerMessageResult {
+  content: string;
+  usage: TaskTokenUsage | null;
+}
 
 export type WorkerError =
   | { type: "REPOSITORY_NOT_SET" }
@@ -22,7 +28,7 @@ export interface IWorker {
     attachments?: readonly SavedAttachment[],
     onProgress?: (content: string) => Promise<void>,
     onReaction?: (emoji: string) => Promise<void>,
-  ): Promise<import("neverthrow").Result<string, WorkerError>>;
+  ): Promise<import("neverthrow").Result<WorkerMessageResult, WorkerError>>;
   getName(): string;
   getRepository(): import("../git-utils.ts").GitRepository | null;
   setRepository(

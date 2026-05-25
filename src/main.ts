@@ -40,7 +40,10 @@ import { buildTaskCostEmbed } from "./task-cost-embed.ts";
 import { OpenAiCostsClient, TaskCostLedger } from "./task-costs.ts";
 import { formatDiscordSendLog } from "./utils/discord-log.ts";
 import { splitIntoDiscordChunks } from "./utils/discord-message.ts";
-import { WorkspaceManager } from "./workspace/workspace.ts";
+import {
+  type TaskTokenUsage,
+  WorkspaceManager,
+} from "./workspace/workspace.ts";
 
 function chunkDiscordContent(content: string): string[] {
   return splitIntoDiscordChunks(content).filter((chunk) =>
@@ -704,17 +707,30 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     const taskEntry = await taskCostLedger.startTask(threadId);
+    let taskUsage: TaskTokenUsage | null = null;
     const result = await (async () => {
       try {
-        return await admin.routeMessage(
+        const routed = await admin.routeMessage(
           threadId,
           message.content,
           savedAttachments,
           onProgress,
           onReaction,
         );
+        if (
+          routed.isOk() && typeof routed.value === "object" &&
+          routed.value !== null && "usage" in routed.value
+        ) {
+          taskUsage = routed.value.usage;
+        }
+        return routed;
       } finally {
         await taskCostLedger.finishTask(threadId, taskEntry.taskId);
+        await taskCostLedger.recordTaskUsage(
+          threadId,
+          taskEntry.taskId,
+          taskUsage,
+        );
         await taskCostLedger.refreshTaskCost(threadId, taskEntry.taskId);
         await updateThreadCostEmbed(threadId, taskEntry.taskId).catch(
           (error) => {

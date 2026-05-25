@@ -1,11 +1,20 @@
 import { err, ok, Result } from "neverthrow";
-import { type TaskCostEntry, WorkspaceManager } from "./workspace/workspace.ts";
+import {
+  type TaskCostEntry,
+  type TaskTokenUsage,
+  WorkspaceManager,
+} from "./workspace/workspace.ts";
 
 export const USD_TO_JPY_RATE = 160;
 
 export interface TaskCostSummary {
   totalUsd: number;
   totalJpy: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
   pendingCount: number;
   failedCount: number;
   readyCount: number;
@@ -28,6 +37,7 @@ export function createTaskCostEntry(taskId: string): TaskCostEntry {
     taskStartedAt: new Date().toISOString(),
     taskFinishedAt: null,
     costStatus: "pending",
+    tokenUsage: null,
     costUsd: null,
     costJpy: null,
     costFetchedAt: null,
@@ -39,6 +49,7 @@ export function summarizeTaskCosts(
   entries: readonly TaskCostEntry[],
 ): TaskCostSummary {
   const readyEntries = entries.filter((entry) => entry.costStatus === "ready");
+  const tokenUsageEntries = entries.filter((entry) => entry.tokenUsage);
   const pendingCount =
     entries.filter((entry) => entry.costStatus === "pending").length;
   const failedCount =
@@ -51,6 +62,22 @@ export function summarizeTaskCosts(
   const latestTask = sortedEntries.length > 0
     ? sortedEntries[sortedEntries.length - 1] ?? null
     : null;
+  const totalInputTokens = tokenUsageEntries.reduce(
+    (sum, entry) => sum + (entry.tokenUsage?.inputTokens ?? 0),
+    0,
+  );
+  const totalCachedInputTokens = tokenUsageEntries.reduce(
+    (sum, entry) => sum + (entry.tokenUsage?.cachedInputTokens ?? 0),
+    0,
+  );
+  const totalOutputTokens = tokenUsageEntries.reduce(
+    (sum, entry) => sum + (entry.tokenUsage?.outputTokens ?? 0),
+    0,
+  );
+  const totalReasoningOutputTokens = tokenUsageEntries.reduce(
+    (sum, entry) => sum + (entry.tokenUsage?.reasoningOutputTokens ?? 0),
+    0,
+  );
 
   return {
     totalUsd: readyEntries.reduce(
@@ -61,6 +88,12 @@ export function summarizeTaskCosts(
       (sum, entry) => sum + (entry.costJpy ?? 0),
       0,
     ),
+    inputTokens: totalInputTokens,
+    cachedInputTokens: totalCachedInputTokens,
+    outputTokens: totalOutputTokens,
+    reasoningOutputTokens: totalReasoningOutputTokens,
+    totalTokens: totalInputTokens + totalOutputTokens +
+      totalReasoningOutputTokens,
     pendingCount,
     failedCount,
     readyCount: readyEntries.length,
@@ -197,6 +230,21 @@ export class TaskCostLedger {
     if (!current.taskFinishedAt) {
       current.taskFinishedAt = new Date().toISOString();
     }
+    await this.workspaceManager.saveTaskCostEntry(threadId, current);
+    return current;
+  }
+
+  async recordTaskUsage(
+    threadId: string,
+    taskId: string,
+    tokenUsage: TaskTokenUsage | null,
+  ): Promise<TaskCostEntry | null> {
+    const current = await this.workspaceManager.loadTaskCostEntry(
+      threadId,
+      taskId,
+    );
+    if (!current) return null;
+    current.tokenUsage = tokenUsage;
     await this.workspaceManager.saveTaskCostEntry(threadId, current);
     return current;
   }

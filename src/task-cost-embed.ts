@@ -2,6 +2,7 @@ import { EmbedBuilder } from "discord.js";
 import {
   type TaskCostEntry,
   type TaskCostStatus,
+  type TaskTokenUsage,
 } from "./workspace/workspace.ts";
 import { type TaskCostSummary, usdToJpy } from "./task-costs.ts";
 
@@ -20,6 +21,36 @@ function formatMoneyJpy(value: number): string {
   return `¥${value.toLocaleString("ja-JP")}`;
 }
 
+function formatTokens(value: number): string {
+  return value.toLocaleString("ja-JP");
+}
+
+function getDisplayInputTokens(usage: TaskTokenUsage): number {
+  return Math.max(0, usage.inputTokens - usage.cachedInputTokens);
+}
+
+function formatTokenUsageLines(usage?: TaskTokenUsage | null): string[] {
+  if (!usage) {
+    return ["未確定"];
+  }
+
+  const lines = [
+    `Input: ${formatTokens(getDisplayInputTokens(usage))}`,
+    `Cached Input: ${formatTokens(usage.cachedInputTokens)}`,
+    `Output: ${formatTokens(usage.outputTokens)}`,
+  ];
+  if ((usage.reasoningOutputTokens ?? 0) > 0) {
+    lines.push(`Reasoning: ${formatTokens(usage.reasoningOutputTokens ?? 0)}`);
+  }
+  lines.push(`Total: ${
+    formatTokens(
+      usage.inputTokens + usage.outputTokens +
+        (usage.reasoningOutputTokens ?? 0),
+    )
+  }`);
+  return lines;
+}
+
 function formatStatusLabel(status: TaskCostStatus): string {
   switch (status) {
     case "pending":
@@ -36,21 +67,48 @@ function formatTaskLine(entry?: TaskCostEntry | null): string {
     return "未確定";
   }
 
-  const status = formatStatusLabel(entry.costStatus);
+  const lines = [formatStatusLabel(entry.costStatus)];
+  lines.push(...formatTokenUsageLines(entry.tokenUsage));
   if (
     entry.costStatus === "ready" && entry.costUsd !== null &&
     entry.costUsd !== undefined
   ) {
-    return `${status} / ${formatMoneyUsd(entry.costUsd)} / ${
-      formatMoneyJpy(entry.costJpy ?? usdToJpy(entry.costUsd))
-    }`;
+    lines.push(
+      `Cost: ${formatMoneyUsd(entry.costUsd)} / ${
+        formatMoneyJpy(entry.costJpy ?? usdToJpy(entry.costUsd))
+      }`,
+    );
+    return lines.join("\n");
   }
 
   if (entry.costStatus === "failed" && entry.costError) {
-    return `${status} / ${entry.costError}`;
+    lines.push(`Cost: ${entry.costError}`);
+    return lines.join("\n");
   }
 
-  return status;
+  return lines.join("\n");
+}
+
+function formatSummaryLine(summary: TaskCostSummary): string {
+  const lines = [
+    `Input: ${
+      formatTokens(
+        Math.max(0, summary.inputTokens - summary.cachedInputTokens),
+      )
+    }`,
+    `Cached Input: ${formatTokens(summary.cachedInputTokens)}`,
+    `Output: ${formatTokens(summary.outputTokens)}`,
+  ];
+  if (summary.reasoningOutputTokens > 0) {
+    lines.push(`Reasoning: ${formatTokens(summary.reasoningOutputTokens)}`);
+  }
+  lines.push(`Total: ${formatTokens(summary.totalTokens)}`);
+  lines.push(
+    `Cost: ${formatMoneyUsd(summary.totalUsd)} / ${
+      formatMoneyJpy(summary.totalJpy)
+    }`,
+  );
+  return lines.join("\n");
 }
 
 export function buildTaskCostEmbed(input: TaskCostEmbedInput): EmbedBuilder {
@@ -65,10 +123,8 @@ export function buildTaskCostEmbed(input: TaskCostEmbedInput): EmbedBuilder {
       },
       {
         name: "スレッド累計",
-        value: `${formatMoneyUsd(input.summary.totalUsd)} / ${
-          formatMoneyJpy(input.summary.totalJpy)
-        }`,
-        inline: true,
+        value: formatSummaryLine(input.summary),
+        inline: false,
       },
       {
         name: "件数",
