@@ -506,6 +506,17 @@ client.on(Events.MessageCreate, async (message) => {
 
   const thread = message.channel as ThreadChannel;
   const threadId = thread.id;
+  const workerResult = admin.getWorker(threadId);
+  if (workerResult.isErr()) {
+    const threadInfo = await workspaceManager.loadThreadInfo(threadId);
+    if (threadInfo) {
+      await sendThreadMessage(
+        thread,
+        "このスレッドはアクティブではありません。/start で新規に開始してください。",
+      );
+    }
+    return;
+  }
 
   try {
     const threadInfo = await workspaceManager.loadThreadInfo(threadId);
