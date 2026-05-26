@@ -1,6 +1,7 @@
 import { assertEquals } from "std/assert/mod.ts";
 import {
   createTaskCostEntry,
+  estimateTaskCostUsd,
   OpenAiCostsClient,
   summarizeTaskCosts,
   usdToJpy,
@@ -41,8 +42,27 @@ Deno.test("Task costs: ready な台帳だけを集計できる", () => {
   assertEquals(summary.outputTokens, 30);
   assertEquals(summary.reasoningOutputTokens, 10);
   assertEquals(summary.totalTokens, 140);
+  assertEquals(summary.estimatedPendingUsd, 0);
+  assertEquals(summary.estimatedPendingJpy, 0);
+  assertEquals(summary.estimatedTotalUsd, 1.25);
+  assertEquals(summary.estimatedTotalJpy, 200);
   assertEquals(summary.readyCount, 1);
   assertEquals(summary.pendingCount, 1);
+});
+
+Deno.test("Task costs: pending task の推定金額を計算できる", () => {
+  const estimated = estimateTaskCostUsd({
+    inputTokens: 1_526_002,
+    cachedInputTokens: 1_353_600,
+    outputTokens: 14_295,
+    reasoningOutputTokens: 7_453,
+  });
+
+  assertEquals(estimated !== null, true);
+  if (estimated !== null) {
+    assertEquals(Number(estimated.toFixed(6)), 0.843055);
+    assertEquals(usdToJpy(estimated), 135);
+  }
 });
 
 Deno.test("OpenAiCostsClient: Costs API 応答からUSDを抽出できる", async () => {

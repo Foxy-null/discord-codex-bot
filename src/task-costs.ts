@@ -6,10 +6,29 @@ import {
 } from "./workspace/workspace.ts";
 
 export const USD_TO_JPY_RATE = 160;
+export const TASK_COST_ESTIMATE_MODEL_ID = "gpt-5.3-codex";
+
+interface TaskCostEstimateRates {
+  inputUsdPerMillionTokens: number;
+  cachedInputUsdPerMillionTokens: number;
+  outputUsdPerMillionTokens: number;
+}
+
+const TASK_COST_ESTIMATE_RATES: Record<string, TaskCostEstimateRates> = {
+  "gpt-5.3-codex": {
+    inputUsdPerMillionTokens: 1.75,
+    cachedInputUsdPerMillionTokens: 0.175,
+    outputUsdPerMillionTokens: 14,
+  },
+};
 
 export interface TaskCostSummary {
   totalUsd: number;
   totalJpy: number;
+  estimatedPendingUsd: number;
+  estimatedPendingJpy: number;
+  estimatedTotalUsd: number;
+  estimatedTotalJpy: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
@@ -29,6 +48,33 @@ export type TaskCostFetchError =
 
 export function usdToJpy(usd: number): number {
   return Math.round(usd * USD_TO_JPY_RATE);
+}
+
+export function estimateTaskCostUsd(
+  tokenUsage: {
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+    reasoningOutputTokens?: number | null;
+  },
+  modelId: string = TASK_COST_ESTIMATE_MODEL_ID,
+): number | null {
+  const rates = TASK_COST_ESTIMATE_RATES[modelId];
+  if (!rates) {
+    return null;
+  }
+
+  const nonCachedInputTokens = Math.max(
+    0,
+    tokenUsage.inputTokens - tokenUsage.cachedInputTokens,
+  );
+  const reasoningTokens = tokenUsage.reasoningOutputTokens ?? 0;
+
+  return (
+    nonCachedInputTokens * rates.inputUsdPerMillionTokens +
+    tokenUsage.cachedInputTokens * rates.cachedInputUsdPerMillionTokens +
+    (tokenUsage.outputTokens + reasoningTokens) * rates.outputUsdPerMillionTokens
+  ) / 1_000_000;
 }
 
 export function createTaskCostEntry(taskId: string): TaskCostEntry {
@@ -78,22 +124,36 @@ export function summarizeTaskCosts(
     (sum, entry) => sum + (entry.tokenUsage?.reasoningOutputTokens ?? 0),
     0,
   );
+  const estimatedPendingUsd = entries.reduce((sum, entry) => {
+    if (entry.costStatus !== "pending" || !entry.tokenUsage) {
+      return sum;
+    }
+    const estimated = estimateTaskCostUsd(entry.tokenUsage);
+    return sum + (estimated ?? 0);
+  }, 0);
+  const estimatedPendingJpy = usdToJpy(estimatedPendingUsd);
+  const totalUsd = readyEntries.reduce(
+    (sum, entry) => sum + (entry.costUsd ?? 0),
+    0,
+  );
+  const totalJpy = readyEntries.reduce(
+    (sum, entry) => sum + (entry.costJpy ?? 0),
+    0,
+  );
 
   return {
-    totalUsd: readyEntries.reduce(
-      (sum, entry) => sum + (entry.costUsd ?? 0),
-      0,
-    ),
-    totalJpy: readyEntries.reduce(
-      (sum, entry) => sum + (entry.costJpy ?? 0),
-      0,
-    ),
+    totalUsd,
+    totalJpy,
     inputTokens: totalInputTokens,
     cachedInputTokens: totalCachedInputTokens,
     outputTokens: totalOutputTokens,
     reasoningOutputTokens: totalReasoningOutputTokens,
     totalTokens: totalInputTokens + totalOutputTokens +
       totalReasoningOutputTokens,
+    estimatedPendingUsd,
+    estimatedPendingJpy,
+    estimatedTotalUsd: totalUsd + estimatedPendingUsd,
+    estimatedTotalJpy: totalJpy + estimatedPendingJpy,
     pendingCount,
     failedCount,
     readyCount: readyEntries.length,

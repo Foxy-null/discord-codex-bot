@@ -4,7 +4,11 @@ import {
   type TaskCostStatus,
   type TaskTokenUsage,
 } from "./workspace/workspace.ts";
-import { type TaskCostSummary, usdToJpy } from "./task-costs.ts";
+import {
+  estimateTaskCostUsd,
+  type TaskCostSummary,
+  usdToJpy,
+} from "./task-costs.ts";
 
 export interface TaskCostEmbedInput {
   threadName: string;
@@ -51,6 +55,14 @@ function formatTokenUsageLines(usage?: TaskTokenUsage | null): string[] {
   return lines;
 }
 
+function formatCostLine(
+  usd: number,
+  jpy: number,
+  label = "Cost",
+): string {
+  return `${label}: ${formatMoneyUsd(usd)} / ${formatMoneyJpy(jpy)}`;
+}
+
 function formatStatusLabel(status: TaskCostStatus): string {
   switch (status) {
     case "pending":
@@ -74,9 +86,20 @@ function formatTaskLine(entry?: TaskCostEntry | null): string {
     entry.costUsd !== undefined
   ) {
     lines.push(
-      `Cost: ${formatMoneyUsd(entry.costUsd)} / ${
-        formatMoneyJpy(entry.costJpy ?? usdToJpy(entry.costUsd))
-      }`,
+      formatCostLine(entry.costUsd, entry.costJpy ?? usdToJpy(entry.costUsd)),
+    );
+    return lines.join("\n");
+  }
+
+  if (
+    entry.costStatus === "pending" && entry.tokenUsage
+  ) {
+    const estimatedUsd = estimateTaskCostUsd(entry.tokenUsage) ?? 0;
+    if (estimatedUsd <= 0) {
+      return lines.join("\n");
+    }
+    lines.push(
+      formatCostLine(estimatedUsd, usdToJpy(estimatedUsd), "Cost (est.)"),
     );
     return lines.join("\n");
   }
@@ -103,11 +126,23 @@ function formatSummaryLine(summary: TaskCostSummary): string {
     lines.push(`Reasoning: ${formatTokens(summary.reasoningOutputTokens)}`);
   }
   lines.push(`Total: ${formatTokens(summary.totalTokens)}`);
-  lines.push(
-    `Cost: ${formatMoneyUsd(summary.totalUsd)} / ${
-      formatMoneyJpy(summary.totalJpy)
-    }`,
-  );
+  lines.push(formatCostLine(summary.totalUsd, summary.totalJpy));
+  if (summary.estimatedPendingUsd > 0) {
+    lines.push(
+      formatCostLine(
+        summary.estimatedPendingUsd,
+        summary.estimatedPendingJpy,
+        "Estimated Pending",
+      ),
+    );
+    lines.push(
+      formatCostLine(
+        summary.estimatedTotalUsd,
+        summary.estimatedTotalJpy,
+        "Estimated Total",
+      ),
+    );
+  }
   return lines.join("\n");
 }
 
