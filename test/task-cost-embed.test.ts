@@ -43,14 +43,21 @@ Deno.test("Task cost embed: 集計結果を埋め込める", () => {
 
   assertEquals(embed.data.title, "Token / Cost Tracker");
   assertEquals(embed.data.fields?.[0].name, "今回のタスク");
+  assertEquals(embed.data.fields?.[0].inline, true);
   assertEquals(
     embed.data.fields?.[0].value,
-    "反映済み\nInput: 90\nCached Input: 10\nOutput: 20\nReasoning: 5\nTotal: 125\nCost: $1.20 / ¥192",
+    "反映済み\nInput 90 (cached 10) | Output 20 | Reasoning 5 | Total 125\nCost: $1.20 / ¥192",
   );
   assertEquals(
     embed.data.fields?.[1].value,
-    "Input: 1,000\nCached Input: 200\nOutput: 150\nReasoning: 50\nTotal: 1,400\nCost: $3.20 / ¥512",
+    "Total: 1,400\nReasoning: 50\nCost: $3.20 / ¥512",
   );
+  assertEquals(embed.data.fields?.[1].inline, true);
+  assertEquals(
+    embed.data.fields?.[2].value,
+    "反映済み: 2 / 集計待ち: 1 / 取得失敗: 0",
+  );
+  assertEquals(embed.data.fields?.[2].inline, true);
 });
 
 Deno.test("Task cost embed: 集計待ちの推定コストを表示できる", () => {
@@ -70,11 +77,11 @@ Deno.test("Task cost embed: 集計待ちの推定コストを表示できる", (
       estimatedPendingJpy: 135,
       estimatedTotalUsd: estimated,
       estimatedTotalJpy: 135,
-      inputTokens: 1526002,
-      cachedInputTokens: 1353600,
-      outputTokens: 14295,
-      reasoningOutputTokens: 7453,
-      totalTokens: 1547750,
+      inputTokens: 1_526_002,
+      cachedInputTokens: 1_353_600,
+      outputTokens: 14_295,
+      reasoningOutputTokens: 7_453,
+      totalTokens: 1_547_750,
       pendingCount: 1,
       failedCount: 0,
       readyCount: 0,
@@ -86,10 +93,10 @@ Deno.test("Task cost embed: 集計待ちの推定コストを表示できる", (
       taskFinishedAt: "2026-05-25T00:01:00.000Z",
       costStatus: "pending",
       tokenUsage: {
-        inputTokens: 1526002,
-        cachedInputTokens: 1353600,
-        outputTokens: 14295,
-        reasoningOutputTokens: 7453,
+        inputTokens: 1_526_002,
+        cachedInputTokens: 1_353_600,
+        outputTokens: 14_295,
+        reasoningOutputTokens: 7_453,
       },
       costUsd: null,
       costJpy: null,
@@ -101,10 +108,10 @@ Deno.test("Task cost embed: 集計待ちの推定コストを表示できる", (
 
   assertEquals(
     embed.data.fields?.[0].value,
-    "集計待ち\nInput: 172,402\nCached Input: 1,353,600\nOutput: 14,295\nReasoning: 7,453\nTotal: 1,547,750\nCost (est.): $0.84 / ¥135",
+    "集計待ち\nInput 172,402 (cached 1,353,600) | Output 14,295 | Reasoning 7,453 | Total 1,547,750\nCost (est.): $0.84 / ¥135",
   );
   assertEquals(
     embed.data.fields?.[1].value,
-    "Input: 172,402\nCached Input: 1,353,600\nOutput: 14,295\nReasoning: 7,453\nTotal: 1,547,750\nCost: $0.00 / ¥0\nEstimated Pending: $0.84 / ¥135\nEstimated Total: $0.84 / ¥135",
+    "Total: 1,547,750\nReasoning: 7,453\nCost: $0.00 / ¥0\nEstimated Pending: $0.84 / ¥135\nEstimated Total: $0.84 / ¥135",
   );
 });

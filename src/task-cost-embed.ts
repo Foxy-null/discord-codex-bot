@@ -1,14 +1,14 @@
 import { EmbedBuilder } from "discord.js";
 import {
-  type TaskCostEntry,
-  type TaskCostStatus,
-  type TaskTokenUsage,
-} from "./workspace/workspace.ts";
-import {
   estimateTaskCostUsd,
   type TaskCostSummary,
   usdToJpy,
 } from "./task-costs.ts";
+import {
+  type TaskCostEntry,
+  type TaskCostStatus,
+  type TaskTokenUsage,
+} from "./workspace/workspace.ts";
 
 export interface TaskCostEmbedInput {
   threadName: string;
@@ -33,26 +33,27 @@ function getDisplayInputTokens(usage: TaskTokenUsage): number {
   return Math.max(0, usage.inputTokens - usage.cachedInputTokens);
 }
 
-function formatTokenUsageLines(usage?: TaskTokenUsage | null): string[] {
+function formatTokenUsageLine(usage?: TaskTokenUsage | null): string {
   if (!usage) {
-    return ["未確定"];
+    return "未確定";
   }
 
-  const lines = [
-    `Input: ${formatTokens(getDisplayInputTokens(usage))}`,
-    `Cached Input: ${formatTokens(usage.cachedInputTokens)}`,
-    `Output: ${formatTokens(usage.outputTokens)}`,
+  const segments = [
+    `Input ${formatTokens(getDisplayInputTokens(usage))} (cached ${
+      formatTokens(usage.cachedInputTokens)
+    })`,
+    `Output ${formatTokens(usage.outputTokens)}`,
   ];
   if ((usage.reasoningOutputTokens ?? 0) > 0) {
-    lines.push(`Reasoning: ${formatTokens(usage.reasoningOutputTokens ?? 0)}`);
+    segments.push(`Reasoning ${formatTokens(usage.reasoningOutputTokens ?? 0)}`);
   }
-  lines.push(`Total: ${
+  segments.push(`Total ${
     formatTokens(
       usage.inputTokens + usage.outputTokens +
         (usage.reasoningOutputTokens ?? 0),
     )
   }`);
-  return lines;
+  return segments.join(" | ");
 }
 
 function formatCostLine(
@@ -80,7 +81,7 @@ function formatTaskLine(entry?: TaskCostEntry | null): string {
   }
 
   const lines = [formatStatusLabel(entry.costStatus)];
-  lines.push(...formatTokenUsageLines(entry.tokenUsage));
+  lines.push(formatTokenUsageLine(entry.tokenUsage));
   if (
     entry.costStatus === "ready" && entry.costUsd !== null &&
     entry.costUsd !== undefined
@@ -91,16 +92,13 @@ function formatTaskLine(entry?: TaskCostEntry | null): string {
     return lines.join("\n");
   }
 
-  if (
-    entry.costStatus === "pending" && entry.tokenUsage
-  ) {
+  if (entry.costStatus === "pending" && entry.tokenUsage) {
     const estimatedUsd = estimateTaskCostUsd(entry.tokenUsage) ?? 0;
-    if (estimatedUsd <= 0) {
-      return lines.join("\n");
+    if (estimatedUsd > 0) {
+      lines.push(
+        formatCostLine(estimatedUsd, usdToJpy(estimatedUsd), "Cost (est.)"),
+      );
     }
-    lines.push(
-      formatCostLine(estimatedUsd, usdToJpy(estimatedUsd), "Cost (est.)"),
-    );
     return lines.join("\n");
   }
 
@@ -113,19 +111,10 @@ function formatTaskLine(entry?: TaskCostEntry | null): string {
 }
 
 function formatSummaryLine(summary: TaskCostSummary): string {
-  const lines = [
-    `Input: ${
-      formatTokens(
-        Math.max(0, summary.inputTokens - summary.cachedInputTokens),
-      )
-    }`,
-    `Cached Input: ${formatTokens(summary.cachedInputTokens)}`,
-    `Output: ${formatTokens(summary.outputTokens)}`,
-  ];
+  const lines = [`Total: ${formatTokens(summary.totalTokens)}`];
   if (summary.reasoningOutputTokens > 0) {
     lines.push(`Reasoning: ${formatTokens(summary.reasoningOutputTokens)}`);
   }
-  lines.push(`Total: ${formatTokens(summary.totalTokens)}`);
   lines.push(formatCostLine(summary.totalUsd, summary.totalJpy));
   if (summary.estimatedPendingUsd > 0) {
     lines.push(
@@ -154,12 +143,12 @@ export function buildTaskCostEmbed(input: TaskCostEmbedInput): EmbedBuilder {
       {
         name: "今回のタスク",
         value: formatTaskLine(input.latestTask),
-        inline: false,
+        inline: true,
       },
       {
         name: "スレッド累計",
         value: formatSummaryLine(input.summary),
-        inline: false,
+        inline: true,
       },
       {
         name: "件数",
@@ -167,7 +156,7 @@ export function buildTaskCostEmbed(input: TaskCostEmbedInput): EmbedBuilder {
           `反映済み: ${input.summary.readyCount}`,
           `集計待ち: ${input.summary.pendingCount}`,
           `取得失敗: ${input.summary.failedCount}`,
-        ].join("\n"),
+        ].join(" / "),
         inline: true,
       },
     )
