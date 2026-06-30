@@ -22,7 +22,10 @@ import type {
 import { Admin } from "./admin/admin.ts";
 import type { AdminError } from "./admin/types.ts";
 import {
-  type CodexStatusError,
+  type CodexStatusWithAutoUpdateError,
+  getCodexStatusWithAutoUpdate,
+} from "./codex-status-auto-update.ts";
+import {
   CodexStatusProvider,
   type CodexUsageStatus,
   formatCodexStatus,
@@ -31,6 +34,7 @@ import {
   stripTerminalControlSequences,
 } from "./codex-status.ts";
 import {
+  type CodexUpdateError,
   formatCodexUpdateError,
   formatCodexUpdateResult,
   updateCodexCli,
@@ -395,7 +399,11 @@ async function refreshCodexStatus(
 }
 
 async function getAndApplyCodexStatus(cwd: string) {
-  const result = await codexStatusProvider.getStatus(cwd);
+  const result = await getCodexStatusWithAutoUpdate(
+    cwd,
+    codexStatusProvider,
+    updateCodexCli,
+  );
   if (result.isErr()) {
     console.error(
       "[CodexStatus] failed",
@@ -408,8 +416,29 @@ async function getAndApplyCodexStatus(cwd: string) {
 }
 
 function formatCodexStatusErrorForLog(
-  error: CodexStatusError,
-): CodexStatusError {
+  error: CodexStatusWithAutoUpdateError,
+): CodexStatusWithAutoUpdateError {
+  if (error.type === "AUTO_UPDATE_FAILED") {
+    return {
+      ...error,
+      statusError: formatCodexStatusErrorForLog(
+        error.statusError,
+      ) as typeof error.statusError,
+      updateError: formatCodexUpdateErrorForLog(error.updateError),
+    };
+  }
+  if (!("output" in error)) {
+    return error;
+  }
+  return {
+    ...error,
+    output: truncateLogOutput(error.output),
+  };
+}
+
+function formatCodexUpdateErrorForLog(
+  error: CodexUpdateError,
+): CodexUpdateError {
   if (!("output" in error)) {
     return error;
   }
@@ -427,24 +456,33 @@ function truncateLogOutput(output: string): string {
   return `${cleaned.slice(0, 10)}...`;
 }
 
-function formatCodexStatusError(error: CodexStatusError): string {
+function formatCodexStatusError(
+  error: CodexStatusWithAutoUpdateError,
+): string {
+  if (error.type === "AUTO_UPDATE_FAILED") {
+    return "Codex status の取得に失敗しました。Codex CLI の自動更新も失敗しました。";
+  }
   if (error.type === "UPDATE_REQUIRED") {
     return [
       "Codex CLI の update 通知で status を取得できませんでした。",
-      "`/update` を実行して Codex CLI を更新してから、もう一度 `/status` を実行してください。",
+      "Codex CLI の自動更新を試しましたが、再取得できませんでした。",
     ].join("\n");
   }
   return "Codex status の取得に失敗しました。";
 }
 
-function formatCodexStatusUnavailableNote(error?: CodexStatusError): string {
-  if (error?.type !== "UPDATE_REQUIRED") {
+function formatCodexStatusUnavailableNote(
+  error?: CodexStatusWithAutoUpdateError,
+): string {
+  if (
+    error?.type !== "UPDATE_REQUIRED" &&
+    error?.type !== "AUTO_UPDATE_FAILED"
+  ) {
     return "";
   }
-  return [
-    "Codex limit の取得は Codex CLI の update 通知でブロックされました。",
-    "`/update` を実行すると次回から再び表示できます。",
-  ].join("\n");
+  return error.type === "AUTO_UPDATE_FAILED"
+    ? "Codex limit の取得に失敗し、Codex CLI の自動更新も失敗しました。"
+    : "Codex limit の取得に失敗しました。Codex CLI の自動更新後も再取得できませんでした。";
 }
 
 function updateDiscordPresence(status: CodexUsageStatus): void {
