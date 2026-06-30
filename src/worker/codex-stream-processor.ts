@@ -13,6 +13,10 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function lowerString(value: unknown): string {
+  return typeof value === "string" ? value.toLowerCase() : "";
+}
+
 function flattenText(value: unknown): string {
   if (!value) return "";
   if (typeof value === "string") return value;
@@ -100,8 +104,59 @@ export class CodexStreamProcessor {
     if (eventType === "turn.completed" || eventType === "response.completed") {
       return "";
     }
+    const compactText = this.extractCompactProgressText(json);
+    if (compactText) {
+      return compactText;
+    }
     return flattenText(json.item) || flattenText(json.delta) ||
       flattenText(json.command_output);
+  }
+
+  private extractCompactProgressText(json: Record<string, unknown>): string {
+    const item = asRecord(json.item);
+    const labels = [
+      lowerString(json.type),
+      lowerString(json.event),
+      lowerString(json.kind),
+      lowerString(item?.type),
+      lowerString(item?.event),
+      lowerString(item?.kind),
+    ].filter(Boolean);
+
+    if (
+      !labels.some((label) =>
+        label.includes("compact") || label.includes("compaction")
+      )
+    ) {
+      return "";
+    }
+
+    const status = [
+      lowerString(json.status),
+      lowerString(json.phase),
+      lowerString(json.trigger),
+      lowerString(item?.status),
+      lowerString(item?.phase),
+      lowerString(item?.trigger),
+      ...labels,
+    ].join(" ");
+
+    if (
+      status.includes("complete") || status.includes("completed") ||
+      status.includes("end") || status.includes("finish") ||
+      status.includes("finished") || status.includes("post")
+    ) {
+      return "コンテキスト圧縮が完了しました。";
+    }
+
+    if (
+      status.includes("fail") || status.includes("failed") ||
+      status.includes("error")
+    ) {
+      return "コンテキスト圧縮に失敗しました。";
+    }
+
+    return "コンテキスト圧縮を開始しました。";
   }
 
   private extractFinalText(json: Record<string, unknown>): string {
