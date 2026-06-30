@@ -96,3 +96,28 @@ Deno.test("CodexStreamProcessor: reasoning summaryを進捗テキストとして
   assertEquals(parsed.text, "実装方針を確認しています。");
   assertEquals(parsed.finalText, undefined);
 });
+
+Deno.test("CodexStreamProcessor: compact開始イベントを進捗テキストとして抽出できる", () => {
+  const processor = new CodexStreamProcessor();
+  const parsed = processor.parseLine(JSON.stringify({
+    type: "context.compaction.started",
+    trigger: "auto",
+  }));
+
+  assertEquals(parsed.text, "コンテキスト圧縮を開始しました。");
+  assertEquals(parsed.finalText, undefined);
+});
+
+Deno.test("CodexStreamProcessor: compact完了イベントを進捗テキストとして抽出できる", () => {
+  const processor = new CodexStreamProcessor();
+  const parsed = processor.parseLine(JSON.stringify({
+    type: "item.completed",
+    item: {
+      type: "compaction",
+      status: "completed",
+    },
+  }));
+
+  assertEquals(parsed.text, "コンテキスト圧縮が完了しました。");
+  assertEquals(parsed.finalText, undefined);
+});
