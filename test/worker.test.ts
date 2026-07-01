@@ -181,6 +181,68 @@ Deno.test("Worker: compactイベントを進捗として送信する", async () 
   }
 });
 
+Deno.test("Worker: 進捗通知が失敗してもCodex処理は継続する", async () => {
+  const baseDir = await createTestDir("worker_test_");
+  const worktreePath = await createTestDir("worker_worktree_");
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    const workspaceManager = new WorkspaceManager(baseDir);
+    await workspaceManager.initialize();
+
+    const now = new Date().toISOString();
+    const state: WorkerState = {
+      workerName: "w1",
+      threadId: "thread-1",
+      repository: {
+        fullName: "owner/repo",
+        org: "owner",
+        repo: "repo",
+      },
+      repositoryLocalPath: worktreePath,
+      worktreePath,
+      sessionId: null,
+      status: "active",
+      createdAt: now,
+      lastActiveAt: now,
+    };
+
+    const executor = new FakeCodexExecutor([
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_1",
+          type: "agent_message",
+          text: "最終返信です。",
+        },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        session_id: "session-1",
+      }),
+    ]);
+
+    const worker = new Worker(state, workspaceManager, executor);
+    let progressAttempts = 0;
+    const result = await worker.processMessage(
+      "依頼",
+      [],
+      () => {
+        progressAttempts += 1;
+        return Promise.reject(new Error("discord bad request"));
+      },
+    );
+
+    assertEquals(result.isOk(), true);
+    assertEquals(result._unsafeUnwrap(), "最終返信です。");
+    assertEquals(progressAttempts > 0, true);
+  } finally {
+    console.error = originalConsoleError;
+    await Deno.remove(baseDir, { recursive: true });
+    await Deno.remove(worktreePath, { recursive: true });
+  }
+});
+
 Deno.test("Worker: Codex非ゼロ終了時に診断情報を返してrawログを保存する", async () => {
   const baseDir = await createTestDir("worker_test_");
   const worktreePath = await createTestDir("worker_worktree_");
