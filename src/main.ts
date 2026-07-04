@@ -33,12 +33,7 @@ import {
   formatCodexStatusPresence,
   stripTerminalControlSequences,
 } from "./codex-status.ts";
-import {
-  type CodexUpdateError,
-  formatCodexUpdateError,
-  formatCodexUpdateResult,
-  updateCodexCli,
-} from "./codex-update.ts";
+import { type CodexUpdateError, updateCodexCli } from "./codex-update.ts";
 import { MESSAGES } from "./constants.ts";
 import { getEnv } from "./env.ts";
 import { ensureRepository, parseRepository } from "./git-utils.ts";
@@ -255,10 +250,6 @@ const commands = [
     .setDescription("Codexの利用制限を確認します")
     .toJSON(),
   new SlashCommandBuilder()
-    .setName("update")
-    .setDescription("Codex CLIを最新版へ更新します")
-    .toJSON(),
-  new SlashCommandBuilder()
     .setName("active-threads")
     .setDescription("現在アクティブな作業スレッドを確認します")
     .toJSON(),
@@ -369,11 +360,6 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  if (commandName === "update") {
-    await handleUpdate(interaction);
-    return;
-  }
-
   if (commandName === "active-threads") {
     await handleActiveThreads(interaction);
     return;
@@ -418,24 +404,6 @@ async function handleStatus(interaction: ChatInputCommandInteraction) {
   await interaction.editReply(
     `\`\`\`kotlin\n${formatCodexStatus(result.value)}\n\`\`\``,
   );
-}
-
-async function handleUpdate(interaction: ChatInputCommandInteraction) {
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const result = await updateCodexCli();
-  if (result.isErr()) {
-    await interaction.editReply(formatCodexUpdateError(result.error));
-    return;
-  }
-  await interaction.editReply(formatCodexUpdateResult(result.value));
-  await refreshCodexStatus(Deno.cwd());
-}
-
-async function refreshCodexStatus(
-  cwd: string,
-): Promise<CodexUsageStatus | null> {
-  const result = await getAndApplyCodexStatus(cwd);
-  return result.isOk() ? result.value : null;
 }
 
 async function getAndApplyCodexStatus(cwd: string) {
