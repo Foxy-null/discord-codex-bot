@@ -8,8 +8,15 @@ import {
   WorkspaceManager,
 } from "../workspace/workspace.ts";
 import { WorkerManager } from "./worker-manager.ts";
-import { MessageRouter } from "./message-router.ts";
+import { MessageRouter, type MessageRouterError } from "./message-router.ts";
 import { RateLimitManager } from "./rate-limit-manager.ts";
+
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+  return String(error);
+}
 
 export class Admin implements IAdmin {
   private readonly workerManager: WorkerManager;
@@ -98,13 +105,22 @@ export class Admin implements IAdmin {
     onProgress?: (content: string) => Promise<void>,
     onReaction?: (emoji: string) => Promise<void>,
   ): Promise<Result<string | DiscordMessage, AdminError>> {
-    const result = await this.messageRouter.routeMessage(
-      threadId,
-      message,
-      attachments,
-      onProgress,
-      onReaction,
-    );
+    let result: Result<string | DiscordMessage, MessageRouterError>;
+    try {
+      result = await this.messageRouter.routeMessage(
+        threadId,
+        message,
+        attachments,
+        onProgress,
+        onReaction,
+      );
+    } catch (error) {
+      return err({
+        type: "CODEX_EXECUTION_FAILED" as const,
+        threadId,
+        error: `Message routing rejected: ${formatUnknownError(error)}`,
+      });
+    }
     if (result.isErr()) {
       if (result.error.type === "WORKER_NOT_FOUND") {
         return err({ type: "WORKER_NOT_FOUND", threadId });

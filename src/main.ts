@@ -22,7 +22,10 @@ import type {
 import { Admin } from "./admin/admin.ts";
 import type { AdminError } from "./admin/types.ts";
 import {
-  type CodexStatusError,
+  type CodexStatusWithAutoUpdateError,
+  getCodexStatusWithAutoUpdate,
+} from "./codex-status-auto-update.ts";
+import {
   CodexStatusProvider,
   type CodexUsageStatus,
   formatCodexStatus,
@@ -30,11 +33,7 @@ import {
   formatCodexStatusPresence,
   stripTerminalControlSequences,
 } from "./codex-status.ts";
-import {
-  formatCodexUpdateError,
-  formatCodexUpdateResult,
-  updateCodexCli,
-} from "./codex-update.ts";
+import { type CodexUpdateError, updateCodexCli } from "./codex-update.ts";
 import { MESSAGES } from "./constants.ts";
 import { getEnv } from "./env.ts";
 import { ensureRepository, parseRepository } from "./git-utils.ts";
@@ -153,6 +152,38 @@ async function replyToThreadMessage(message: Message, content: string) {
   return sent;
 }
 
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+  return String(error);
+}
+
+function logUnexpectedError(context: string, error: unknown): void {
+  console.error(`[${context}] unexpected error`, formatUnknownError(error));
+}
+
+async function runSafely(
+  context: string,
+  action: () => Promise<void>,
+): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    logUnexpectedError(context, error);
+  }
+}
+
+globalThis.addEventListener("unhandledrejection", (event) => {
+  logUnexpectedError("UnhandledRejection", event.reason);
+  event.preventDefault();
+});
+
+globalThis.addEventListener("error", (event) => {
+  logUnexpectedError("UncaughtError", event.error ?? event.message);
+  event.preventDefault();
+});
+
 const DEFAULT_THREAD_NAME_PATTERN = /^[\w.-]+\/[\w.-]+-\d+$/;
 
 console.log("システム要件をチェックしています...");
@@ -220,10 +251,6 @@ const commands = [
     .setDescription("Codexの利用制限を確認します")
     .toJSON(),
   new SlashCommandBuilder()
-    .setName("update")
-    .setDescription("Codex CLIを最新版へ更新します")
-    .toJSON(),
-  new SlashCommandBuilder()
     .setName("active-threads")
     .setDescription("現在アクティブな作業スレッドを確認します")
     .toJSON(),
@@ -234,23 +261,29 @@ const commands = [
     .toJSON(),
 ];
 
-client.once(Events.ClientReady, async (readyClient) => {
-  console.log(`ログイン完了: ${readyClient.user.tag}`);
-
-  const restoreResult = await admin.restoreActiveThreads();
-  if (restoreResult.isErr()) {
-    console.error("スレッド復旧中にエラー:", restoreResult.error);
-  }
-
-  const rest = new REST({ version: "10" }).setToken(env.DISCORD_TOKEN);
-  await rest.put(Routes.applicationCommands(readyClient.user.id), {
-    body: commands,
-  });
-  console.log("スラッシュコマンド登録完了");
+client.on("error", (error) => {
+  logUnexpectedError("DiscordClient", error);
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  try {
+client.once(Events.ClientReady, (readyClient) => {
+  void runSafely("ClientReady", async () => {
+    console.log(`ログイン完了: ${readyClient.user.tag}`);
+
+    const restoreResult = await admin.restoreActiveThreads();
+    if (restoreResult.isErr()) {
+      console.error("スレッド復旧中にエラー:", restoreResult.error);
+    }
+
+    const rest = new REST({ version: "10" }).setToken(env.DISCORD_TOKEN);
+    await rest.put(Routes.applicationCommands(readyClient.user.id), {
+      body: commands,
+    });
+    console.log("スラッシュコマンド登録完了");
+  });
+});
+
+client.on(Events.InteractionCreate, (interaction) => {
+  void runSafely("InteractionCreate", async () => {
     if (interaction.isAutocomplete()) {
       await handleAutocomplete(interaction);
       return;
@@ -258,9 +291,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand()) {
       await handleSlashCommand(interaction);
     }
-  } catch (error) {
-    console.error("[InteractionCreate] unhandled error", error);
-  }
+  });
 });
 
 async function handleAutocomplete(interaction: AutocompleteInteraction) {
@@ -330,11 +361,6 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  if (commandName === "update") {
-    await handleUpdate(interaction);
-    return;
-  }
-
   if (commandName === "active-threads") {
     await handleActiveThreads(interaction);
     return;
@@ -381,26 +407,12 @@ async function handleStatus(interaction: ChatInputCommandInteraction) {
   );
 }
 
-async function handleUpdate(interaction: ChatInputCommandInteraction) {
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const result = await updateCodexCli();
-  if (result.isErr()) {
-    await interaction.editReply(formatCodexUpdateError(result.error));
-    return;
-  }
-  await interaction.editReply(formatCodexUpdateResult(result.value));
-  await refreshCodexStatus(Deno.cwd());
-}
-
-async function refreshCodexStatus(
-  cwd: string,
-): Promise<CodexUsageStatus | null> {
-  const result = await getAndApplyCodexStatus(cwd);
-  return result.isOk() ? result.value : null;
-}
-
 async function getAndApplyCodexStatus(cwd: string) {
-  const result = await codexStatusProvider.getStatus(cwd);
+  const result = await getCodexStatusWithAutoUpdate(
+    cwd,
+    codexStatusProvider,
+    updateCodexCli,
+  );
   if (result.isErr()) {
     console.error(
       "[CodexStatus] failed",
@@ -413,8 +425,29 @@ async function getAndApplyCodexStatus(cwd: string) {
 }
 
 function formatCodexStatusErrorForLog(
-  error: CodexStatusError,
-): CodexStatusError {
+  error: CodexStatusWithAutoUpdateError,
+): CodexStatusWithAutoUpdateError {
+  if (error.type === "AUTO_UPDATE_FAILED") {
+    return {
+      ...error,
+      statusError: formatCodexStatusErrorForLog(
+        error.statusError,
+      ) as typeof error.statusError,
+      updateError: formatCodexUpdateErrorForLog(error.updateError),
+    };
+  }
+  if (!("output" in error)) {
+    return error;
+  }
+  return {
+    ...error,
+    output: truncateLogOutput(error.output),
+  };
+}
+
+function formatCodexUpdateErrorForLog(
+  error: CodexUpdateError,
+): CodexUpdateError {
   if (!("output" in error)) {
     return error;
   }
@@ -432,24 +465,33 @@ function truncateLogOutput(output: string): string {
   return `${cleaned.slice(0, 10)}...`;
 }
 
-function formatCodexStatusError(error: CodexStatusError): string {
+function formatCodexStatusError(
+  error: CodexStatusWithAutoUpdateError,
+): string {
+  if (error.type === "AUTO_UPDATE_FAILED") {
+    return "Codex status の取得に失敗しました。Codex CLI の自動更新も失敗しました。";
+  }
   if (error.type === "UPDATE_REQUIRED") {
     return [
       "Codex CLI の update 通知で status を取得できませんでした。",
-      "`/update` を実行して Codex CLI を更新してから、もう一度 `/status` を実行してください。",
+      "Codex CLI の自動更新を試しましたが、再取得できませんでした。",
     ].join("\n");
   }
   return "Codex status の取得に失敗しました。";
 }
 
-function formatCodexStatusUnavailableNote(error?: CodexStatusError): string {
-  if (error?.type !== "UPDATE_REQUIRED") {
+function formatCodexStatusUnavailableNote(
+  error?: CodexStatusWithAutoUpdateError,
+): string {
+  if (
+    error?.type !== "UPDATE_REQUIRED" &&
+    error?.type !== "AUTO_UPDATE_FAILED"
+  ) {
     return "";
   }
-  return [
-    "Codex limit の取得は Codex CLI の update 通知でブロックされました。",
-    "`/update` を実行すると次回から再び表示できます。",
-  ].join("\n");
+  return error.type === "AUTO_UPDATE_FAILED"
+    ? "Codex limit の取得に失敗し、Codex CLI の自動更新も失敗しました。"
+    : "Codex limit の取得に失敗しました。Codex CLI の自動更新後も再取得できませんでした。";
 }
 
 function updateDiscordPresence(status: CodexUsageStatus): void {
@@ -589,111 +631,26 @@ async function handleStart(interaction: ChatInputCommandInteraction) {
   }
 }
 
-client.on(Events.ThreadUpdate, async (oldThread, newThread) => {
-  if (!oldThread.archived && newThread.archived) {
-    const threadInfo = await workspaceManager.loadThreadInfo(newThread.id);
-    if (threadInfo?.status === "archived") return;
-    await admin.terminateThread(newThread.id);
-  }
+client.on(Events.ThreadUpdate, (oldThread, newThread) => {
+  void runSafely("ThreadUpdate", async () => {
+    if (!oldThread.archived && newThread.archived) {
+      const threadInfo = await workspaceManager.loadThreadInfo(newThread.id);
+      if (threadInfo?.status === "archived") return;
+      await admin.terminateThread(newThread.id);
+    }
+  });
 });
 
-client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot) return;
-  if (!message.channel.isThread()) return;
-  if (message.content.startsWith("!")) return;
+client.on(Events.MessageCreate, (message) => {
+  void runSafely("MessageCreate", async () => {
+    if (message.author.bot) return;
+    if (!message.channel.isThread()) return;
+    if (message.content.startsWith("!")) return;
 
-  const thread = message.channel as ThreadChannel;
-  const threadId = thread.id;
-  const workerResult = admin.getWorker(threadId);
-  if (workerResult.isErr()) {
-    const threadInfo = await workspaceManager.loadThreadInfo(threadId);
-    if (threadInfo) {
-      await sendThreadMessage(
-        thread,
-        "このスレッドはアクティブではありません。/start で新規に開始してください。",
-      );
-    }
-    return;
-  }
-
-  try {
-    const threadInfo = await workspaceManager.loadThreadInfo(threadId);
-    if (threadInfo && !threadInfo.firstUserMessageReceivedAt) {
-      threadInfo.firstUserMessageReceivedAt = new Date().toISOString();
-      threadInfo.autoRenamedByFirstMessage = false;
-
-      if (
-        message.content.trim().length > 0 &&
-        DEFAULT_THREAD_NAME_PATTERN.test(thread.name)
-      ) {
-        const workerState = await workspaceManager.loadWorkerState(threadId);
-        const renameResult = await generateThreadNameWithCodex(
-          message.content,
-          threadInfo.repositoryFullName ?? undefined,
-          workerState?.worktreePath ?? undefined,
-        );
-        if (renameResult.isOk()) {
-          await thread.setName(renameResult.value).catch(() => {});
-          threadInfo.autoRenamedByFirstMessage = true;
-        }
-      }
-
-      await workspaceManager.saveThreadInfo(threadInfo);
-    }
-  } catch (error) {
-    console.error("[ThreadRename] first-message rename failed", error);
-  }
-
-  let lastProgressMessageUrl: string | null = null;
-  const onProgress = async (content: string) => {
-    for (const chunk of chunkDiscordContent(content)) {
-      const sent = await sendThreadMessage(thread, {
-        content: chunk,
-        flags: MessageFlags.SuppressNotifications,
-      });
-      lastProgressMessageUrl = sent.url;
-    }
-  };
-
-  const onReaction = async (emoji: string) => {
-    await message.react(emoji).catch(() => {});
-  };
-
-  const startStatusResult = await getAndApplyCodexStatus(Deno.cwd());
-  const startStatus = startStatusResult.isOk() ? startStatusResult.value : null;
-
-  const attachmentInputs = getAttachmentDownloadInputs(message);
-  let savedAttachments: SavedAttachment[] = [];
-  if (attachmentInputs.length > 0) {
-    await onProgress(
-      `📎 添付ファイル ${attachmentInputs.length} 件を保存しています...`,
-    );
-    try {
-      savedAttachments = await workspaceManager.saveMessageAttachments(
-        threadId,
-        message.id,
-        attachmentInputs,
-      );
-      await onReaction("📎");
-    } catch (error) {
-      await sendThreadMessage(
-        thread,
-        `添付ファイルの保存に失敗しました: ${(error as Error).message}`,
-      );
-      return;
-    }
-  }
-
-  const result = await admin.routeMessage(
-    threadId,
-    message.content,
-    savedAttachments,
-    onProgress,
-    onReaction,
-  );
-
-  if (result.isErr()) {
-    if (result.error.type === "WORKER_NOT_FOUND") {
+    const thread = message.channel as ThreadChannel;
+    const threadId = thread.id;
+    const workerResult = admin.getWorker(threadId);
+    if (workerResult.isErr()) {
       const threadInfo = await workspaceManager.loadThreadInfo(threadId);
       if (threadInfo) {
         await sendThreadMessage(
@@ -703,51 +660,145 @@ client.on(Events.MessageCreate, async (message) => {
       }
       return;
     }
-    if (result.error.type === "RATE_LIMIT") {
-      await sendThreadMessage(thread, admin.createRateLimitMessage());
+
+    try {
+      const threadInfo = await workspaceManager.loadThreadInfo(threadId);
+      if (threadInfo && !threadInfo.firstUserMessageReceivedAt) {
+        threadInfo.firstUserMessageReceivedAt = new Date().toISOString();
+        threadInfo.autoRenamedByFirstMessage = false;
+
+        if (
+          message.content.trim().length > 0 &&
+          DEFAULT_THREAD_NAME_PATTERN.test(thread.name)
+        ) {
+          const workerState = await workspaceManager.loadWorkerState(threadId);
+          const renameResult = await generateThreadNameWithCodex(
+            message.content,
+            threadInfo.repositoryFullName ?? undefined,
+            workerState?.worktreePath ?? undefined,
+          );
+          if (renameResult.isOk()) {
+            await thread.setName(renameResult.value).catch(() => {});
+            threadInfo.autoRenamedByFirstMessage = true;
+          }
+        }
+
+        await workspaceManager.saveThreadInfo(threadInfo);
+      }
+    } catch (error) {
+      console.error("[ThreadRename] first-message rename failed", error);
+    }
+
+    let lastProgressMessageUrl: string | null = null;
+    const onProgress = async (content: string) => {
+      for (const chunk of chunkDiscordContent(content)) {
+        const sent = await sendThreadMessage(thread, {
+          content: chunk,
+          flags: MessageFlags.SuppressNotifications,
+        });
+        lastProgressMessageUrl = sent.url;
+      }
+    };
+
+    const onReaction = async (emoji: string) => {
+      await message.react(emoji).catch(() => {});
+    };
+
+    const startStatusResult = await getAndApplyCodexStatus(Deno.cwd());
+    const startStatus = startStatusResult.isOk()
+      ? startStatusResult.value
+      : null;
+
+    const attachmentInputs = getAttachmentDownloadInputs(message);
+    let savedAttachments: SavedAttachment[] = [];
+    if (attachmentInputs.length > 0) {
+      await onProgress(
+        `📎 添付ファイル ${attachmentInputs.length} 件を保存しています...`,
+      );
+      try {
+        savedAttachments = await workspaceManager.saveMessageAttachments(
+          threadId,
+          message.id,
+          attachmentInputs,
+        );
+        await onReaction("📎");
+      } catch (error) {
+        await sendThreadMessage(
+          thread,
+          `添付ファイルの保存に失敗しました: ${(error as Error).message}`,
+        );
+        return;
+      }
+    }
+
+    const result = await admin.routeMessage(
+      threadId,
+      message.content,
+      savedAttachments,
+      onProgress,
+      onReaction,
+    );
+
+    if (result.isErr()) {
+      if (result.error.type === "WORKER_NOT_FOUND") {
+        const threadInfo = await workspaceManager.loadThreadInfo(threadId);
+        if (threadInfo) {
+          await sendThreadMessage(
+            thread,
+            "このスレッドはアクティブではありません。/start で新規に開始してください。",
+          );
+        }
+        return;
+      }
+      if (result.error.type === "RATE_LIMIT") {
+        await sendThreadMessage(thread, admin.createRateLimitMessage());
+        return;
+      }
+      for (
+        const chunk of chunkDiscordContent(
+          formatAdminErrorForDiscord(result.error),
+        )
+      ) {
+        await sendThreadMessage(thread, {
+          content: chunk,
+          flags: MessageFlags.SuppressNotifications,
+        });
+      }
       return;
     }
-    for (
-      const chunk of chunkDiscordContent(
-        formatAdminErrorForDiscord(result.error),
-      )
-    ) {
-      await sendThreadMessage(thread, {
-        content: chunk,
-        flags: MessageFlags.SuppressNotifications,
-      });
-    }
-    return;
-  }
 
-  const reply = result.value;
-  const replyContent = typeof reply === "string" ? reply : reply.content;
-  const endStatusResult = await getAndApplyCodexStatus(Deno.cwd());
-  const endStatus = endStatusResult.isOk() ? endStatusResult.value : null;
-  const finalReply = replyContent.trim() === MESSAGES.NO_FINAL_RESPONSE &&
-      lastProgressMessageUrl
-    ? `Codexの最終テキストを取得できなかったため、直近の出力を参照してください。\n> ${lastProgressMessageUrl}`
-    : replyContent;
-  const statusUnavailableNote = formatCodexStatusUnavailableNote(
-    endStatusResult.isErr()
-      ? endStatusResult.error
-      : startStatusResult.isErr()
-      ? startStatusResult.error
-      : undefined,
-  );
-  const replyWithStatus = startStatus && endStatus
-    ? `${finalReply}\n\`\`\`kotlin\n${
-      formatCodexStatusDelta(startStatus, endStatus)
-    }\n\`\`\``
-    : statusUnavailableNote
-    ? `${finalReply}\n${statusUnavailableNote}`
-    : finalReply;
-  const chunks = chunkDiscordContent(replyWithStatus);
-  if (chunks.length === 0) return;
-  await replyToThreadMessage(message, chunks[0]);
-  for (const chunk of chunks.slice(1)) {
-    await sendThreadMessage(thread, chunk);
-  }
+    const reply = result.value;
+    const replyContent = typeof reply === "string" ? reply : reply.content;
+    const endStatusResult = await getAndApplyCodexStatus(Deno.cwd());
+    const endStatus = endStatusResult.isOk() ? endStatusResult.value : null;
+    const finalReply = replyContent.trim() === MESSAGES.NO_FINAL_RESPONSE &&
+        lastProgressMessageUrl
+      ? `Codexの最終テキストを取得できなかったため、直近の出力を参照してください。\n> ${lastProgressMessageUrl}`
+      : replyContent;
+    const statusUnavailableNote = formatCodexStatusUnavailableNote(
+      endStatusResult.isErr()
+        ? endStatusResult.error
+        : startStatusResult.isErr()
+        ? startStatusResult.error
+        : undefined,
+    );
+    const replyWithStatus = startStatus && endStatus
+      ? `${finalReply}\n\`\`\`kotlin\n${
+        formatCodexStatusDelta(startStatus, endStatus)
+      }\n\`\`\``
+      : statusUnavailableNote
+      ? `${finalReply}\n${statusUnavailableNote}`
+      : finalReply;
+    const chunks = chunkDiscordContent(replyWithStatus);
+    if (chunks.length === 0) return;
+    await replyToThreadMessage(message, chunks[0]);
+    for (const chunk of chunks.slice(1)) {
+      await sendThreadMessage(thread, chunk);
+    }
+  });
 });
 
-client.login(env.DISCORD_TOKEN);
+void client.login(env.DISCORD_TOKEN).catch((error) => {
+  logUnexpectedError("DiscordLogin", error);
+  Deno.exit(1);
+});

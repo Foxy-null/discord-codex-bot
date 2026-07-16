@@ -7,7 +7,7 @@ Deno.test("formatStartCommandErrorForUser: Missing Access を具体化する", (
       code: 50001,
       message: "Missing Access",
     }),
-    "チャンネルへのアクセス権限が足りません。Bot にこのチャンネルを閲覧・送信できる権限を付与してください。",
+    "Bot の権限が足りません。このチャンネルへのアクセス、メッセージ送信、スレッドの作成・送信権限が付与されているか確認してください。",
   );
 });
 

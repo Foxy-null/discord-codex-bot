@@ -33,6 +33,13 @@ function formatWorkerError(error: WorkerError): string {
   }
 }
 
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+  return String(error);
+}
+
 export class MessageRouter {
   constructor(private readonly workerManager: WorkerManager) {}
 
@@ -52,12 +59,22 @@ export class MessageRouter {
       await onReaction("👀").catch(() => {});
     }
 
-    const result = await worker.processMessage(
-      message,
-      attachments,
-      onProgress,
-      onReaction,
-    );
+    let result: Result<string, WorkerError>;
+    try {
+      result = await worker.processMessage(
+        message,
+        attachments,
+        onProgress,
+        onReaction,
+      );
+    } catch (error) {
+      return err({
+        type: "MESSAGE_PROCESSING_ERROR" as const,
+        threadId,
+        workerErrorType: "CODEX_EXECUTION_FAILED" as const,
+        error: `Worker execution rejected: ${formatUnknownError(error)}`,
+      });
+    }
     if (result.isErr()) {
       const error = result.error;
       if (error.type === "RATE_LIMIT") {

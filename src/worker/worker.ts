@@ -24,6 +24,15 @@ import type { IWorker, WorkerError } from "./types.ts";
 const DIAGNOSTIC_SECTION_LIMIT = 1800;
 const DIAGNOSTIC_TEXT_LIMIT = 5000;
 
+interface CodexFailureDetailOptions {
+  exitCode?: number;
+  reason?: string;
+  stderr?: string;
+  rawOutput: string;
+  outputLastMessagePath?: string | null;
+  sessionLogPath?: string | null;
+}
+
 function redactSensitiveText(text: string): string {
   return text
     .replace(
@@ -44,6 +53,13 @@ function truncateDiagnostic(text: string, limit = DIAGNOSTIC_SECTION_LIMIT) {
   const trimmed = redactSensitiveText(text).trim();
   if (trimmed.length <= limit) return trimmed;
   return `${trimmed.slice(-limit)}\n...前半を省略しました`;
+}
+
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+  return String(error);
 }
 
 export class Worker implements IWorker {
@@ -84,7 +100,10 @@ export class Worker implements IWorker {
       await onReaction("⚙️").catch(() => {});
     }
 
-    await onProgress("🤖 Codexが処理を開始しました...");
+    await this.reportProgress(
+      onProgress,
+      "🤖 Codexが処理を開始しました...",
+    );
 
     this.isExecuting = true;
     this.abortController = new AbortController();
@@ -123,7 +142,7 @@ export class Worker implements IWorker {
           const formatted = this.formatter.formatResponse(parsed.text);
           for (const chunkText of splitIntoDiscordChunks(formatted)) {
             if (!chunkText.trim()) continue;
-            onProgress(chunkText).catch(console.error);
+            void this.reportProgress(onProgress, chunkText);
           }
         }
       }
@@ -179,9 +198,8 @@ export class Worker implements IWorker {
           allOutput,
           newSessionId ?? this.state.sessionId,
         );
-        return err({
-          type: "CODEX_EXECUTION_FAILED",
-          error: await this.formatCodexFailureDetail({
+        return err(
+          await this.createCodexExecutionFailedError({
             reason: execResult.error.type === "COMMAND_EXECUTION_FAILED"
               ? execResult.error.stderr
               : execResult.error.error,
@@ -189,7 +207,7 @@ export class Worker implements IWorker {
             outputLastMessagePath,
             sessionLogPath: logPath,
           }),
-        });
+        );
       }
 
       const { code, stderr } = execResult.value;
@@ -209,16 +227,15 @@ export class Worker implements IWorker {
           allOutput,
           newSessionId ?? this.state.sessionId,
         );
-        return err({
-          type: "CODEX_EXECUTION_FAILED",
-          error: await this.formatCodexFailureDetail({
+        return err(
+          await this.createCodexExecutionFailedError({
             exitCode: code,
             stderr: stderrText,
             rawOutput: allOutput,
             outputLastMessagePath,
             sessionLogPath: logPath,
           }),
-        });
+        );
       }
 
       if (newSessionId && newSessionId !== this.state.sessionId) {
@@ -245,15 +262,14 @@ export class Worker implements IWorker {
         allOutput,
         newSessionId ?? this.state.sessionId,
       );
-      return err({
-        type: "CODEX_EXECUTION_FAILED",
-        error: await this.formatCodexFailureDetail({
+      return err(
+        await this.createCodexExecutionFailedError({
           reason: error instanceof Error ? error.message : String(error),
           rawOutput: allOutput,
           outputLastMessagePath,
           sessionLogPath: logPath,
         }),
-      });
+      );
     } finally {
       this.isExecuting = false;
       this.abortController = null;
@@ -261,6 +277,17 @@ export class Worker implements IWorker {
       if (outputLastMessagePath) {
         await Deno.remove(outputLastMessagePath).catch(() => {});
       }
+    }
+  }
+
+  private async reportProgress(
+    onProgress: (content: string) => Promise<void>,
+    content: string,
+  ): Promise<void> {
+    try {
+      await onProgress(content);
+    } catch (error) {
+      console.error("[Worker] progress callback failed", error);
     }
   }
 
@@ -329,14 +356,33 @@ export class Worker implements IWorker {
     return result.value;
   }
 
-  private async formatCodexFailureDetail(options: {
-    exitCode?: number;
-    reason?: string;
-    stderr?: string;
-    rawOutput: string;
-    outputLastMessagePath?: string | null;
-    sessionLogPath?: string | null;
-  }): Promise<string> {
+  private async createCodexExecutionFailedError(
+    options: CodexFailureDetailOptions,
+  ): Promise<WorkerError> {
+    try {
+      return {
+        type: "CODEX_EXECUTION_FAILED",
+        error: await this.formatCodexFailureDetail(options),
+      };
+    } catch (error) {
+      console.error("[Worker] failed to format Codex failure detail", error);
+      return {
+        type: "CODEX_EXECUTION_FAILED",
+        error: [
+          options.exitCode === undefined
+            ? "Codex実行失敗"
+            : `Codex実行失敗 (終了コード: ${options.exitCode})`,
+          "",
+          "詳細の整形中にエラーが発生しました:",
+          truncateDiagnostic(formatUnknownError(error)),
+        ].join("\n"),
+      };
+    }
+  }
+
+  private async formatCodexFailureDetail(
+    options: CodexFailureDetailOptions,
+  ): Promise<string> {
     const lines = [
       options.exitCode === undefined
         ? "Codex実行失敗"
