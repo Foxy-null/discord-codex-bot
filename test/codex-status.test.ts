@@ -28,6 +28,23 @@ Deno.test("parseCodexStatus: Codex TUIのstatus表示から利用制限を抽出
   });
 });
 
+Deno.test("parseCodexStatus: 5h limitがないstatus表示からWeekly limitを抽出する", () => {
+  const output = [
+    "\x1b[2m│  Weekly limit:         \x1b[22m[█████████████████░░░] 83% left\x1b[2m                │\x1b[m",
+    "\x1b[2m│                        (resets 18:06 on 17 May)                       │\x1b[m",
+  ].join("\n");
+
+  const result = parseCodexStatus(output);
+
+  assertEquals(result.isOk(), true);
+  const status = result._unsafeUnwrap();
+  assertEquals(status.fiveHour, undefined);
+  assertEquals(status.weekly, {
+    percentLeft: 83,
+    resets: "18:06 on 17 May",
+  });
+});
+
 Deno.test("formatCodexStatusDelta: 投稿前後の差分をkotlinブロック用の1行にする", () => {
   const before = {
     fiveHour: { percentLeft: 80, resets: "23:57" },
@@ -57,6 +74,29 @@ Deno.test("formatCodexStatus: /status向けにkotlinブロック用の2行にす
   );
 });
 
+Deno.test("formatCodexStatus: 5h limitがない場合はWeekly limitだけを表示する", () => {
+  const status = {
+    weekly: { percentLeft: 80, resets: "18:06 on 17 May" },
+    capturedAt: "2026-05-13T00:00:00.000Z",
+  };
+
+  assertEquals(
+    formatCodexStatus(status),
+    "Weekly limit: 80% left (resets 18:06 on 17 May)",
+  );
+  assertEquals(
+    formatCodexStatusPresence(status),
+    "W 80% (18:06 on 17 May)",
+  );
+  assertEquals(
+    formatCodexStatusDelta(status, {
+      ...status,
+      weekly: { percentLeft: 78, resets: "18:06 on 17 May" },
+    }),
+    "Weekly limit 80% → 78% (resets 18:06 on 17 May)",
+  );
+});
+
 Deno.test("formatCodexStatusPresence: Discord status向けに短く整形する", () => {
   assertEquals(
     formatCodexStatusPresence({
@@ -75,7 +115,7 @@ Deno.test("convertCodexStatusTimeZone: UTCのreset時刻を指定タイムゾー
     capturedAt: "2026-05-17T18:00:00.000Z",
   }, "Asia/Tokyo");
 
-  assertEquals(status.fiveHour.resets, "08:57");
+  assertEquals(status.fiveHour?.resets, "08:57");
   assertEquals(status.weekly.resets, "03:06 on 18 May");
 });
 

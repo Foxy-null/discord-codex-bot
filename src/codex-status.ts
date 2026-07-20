@@ -6,7 +6,7 @@ export interface CodexUsageLimit {
 }
 
 export interface CodexUsageStatus {
-  fiveHour: CodexUsageLimit;
+  fiveHour?: CodexUsageLimit;
   weekly: CodexUsageLimit;
   capturedAt: string;
 }
@@ -193,12 +193,12 @@ export function parseCodexStatus(
   const fiveHour = parseLimit(cleaned, "5h limit");
   const weekly = parseLimit(cleaned, "Weekly limit");
 
-  if (!fiveHour || !weekly) {
+  if (!weekly) {
     return err({ type: "PARSE_FAILED", output });
   }
 
   return ok({
-    fiveHour,
+    fiveHour: fiveHour ?? undefined,
     weekly,
     capturedAt: new Date().toISOString(),
   });
@@ -219,14 +219,16 @@ export function convertCodexStatusTimeZone(
 ): CodexUsageStatus {
   return {
     ...status,
-    fiveHour: {
-      ...status.fiveHour,
-      resets: convertResetTime(
-        status.fiveHour.resets,
-        status.capturedAt,
-        timeZone,
-      ),
-    },
+    fiveHour: status.fiveHour
+      ? {
+        ...status.fiveHour,
+        resets: convertResetTime(
+          status.fiveHour.resets,
+          status.capturedAt,
+          timeZone,
+        ),
+      }
+      : undefined,
     weekly: {
       ...status.weekly,
       resets: convertResetTime(
@@ -368,25 +370,36 @@ export function isCodexUpdatePrompt(output: string): boolean {
 }
 
 export function formatCodexStatus(status: CodexUsageStatus): string {
-  return [
-    `5h limit: ${status.fiveHour.percentLeft}% left (resets ${status.fiveHour.resets})`,
+  const limits = status.fiveHour
+    ? [
+      `5h limit: ${status.fiveHour.percentLeft}% left (resets ${status.fiveHour.resets})`,
+    ]
+    : [];
+  limits.push(
     `Weekly limit: ${status.weekly.percentLeft}% left (resets ${status.weekly.resets})`,
-  ].join("\n");
+  );
+  return limits.join("\n");
 }
 
 export function formatCodexStatusPresence(status: CodexUsageStatus): string {
-  return [
-    `5h ${status.fiveHour.percentLeft}% (${status.fiveHour.resets})`,
-    `W ${status.weekly.percentLeft}% (${status.weekly.resets})`,
-  ].join(" / ");
+  const limits = status.fiveHour
+    ? [`5h ${status.fiveHour.percentLeft}% (${status.fiveHour.resets})`]
+    : [];
+  limits.push(`W ${status.weekly.percentLeft}% (${status.weekly.resets})`);
+  return limits.join(" / ");
 }
 
 export function formatCodexStatusDelta(
   before: CodexUsageStatus,
   after: CodexUsageStatus,
 ): string {
-  return [
-    `5h limit ${before.fiveHour.percentLeft}% → ${after.fiveHour.percentLeft}% (resets ${after.fiveHour.resets})`,
+  const limits = before.fiveHour && after.fiveHour
+    ? [
+      `5h limit ${before.fiveHour.percentLeft}% → ${after.fiveHour.percentLeft}% (resets ${after.fiveHour.resets})`,
+    ]
+    : [];
+  limits.push(
     `Weekly limit ${before.weekly.percentLeft}% → ${after.weekly.percentLeft}% (resets ${after.weekly.resets})`,
-  ].join("\n");
+  );
+  return limits.join("\n");
 }

@@ -30,7 +30,7 @@ Deno.test("getCodexStatusWithAutoUpdate: status取得成功時はupdateしない
   );
 
   assertEquals(result.isOk(), true);
-  assertEquals(result._unsafeUnwrap().fiveHour.percentLeft, 73);
+  assertEquals(result._unsafeUnwrap().fiveHour?.percentLeft, 73);
   assertEquals(updateCalls, 0);
 });
 
@@ -61,7 +61,7 @@ Deno.test("getCodexStatusWithAutoUpdate: update通知時はupdate後に再取得
   );
 
   assertEquals(result.isOk(), true);
-  assertEquals(result._unsafeUnwrap().fiveHour.percentLeft, 68);
+  assertEquals(result._unsafeUnwrap().fiveHour?.percentLeft, 68);
   assertEquals(statusCalls, 2);
   assertEquals(updateCalls, 1);
 });
