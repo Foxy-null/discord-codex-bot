@@ -2,47 +2,106 @@ import { err, ok, Result } from "neverthrow";
 import { CODEX } from "./constants.ts";
 import { CodexStreamProcessor } from "./worker/codex-stream-processor.ts";
 
+const BRANCH_PREFIXES = new Set([
+  "feat",
+  "fix",
+  "docs",
+  "refactor",
+  "test",
+  "chore",
+  "perf",
+  "build",
+  "ci",
+]);
+
+export interface ConversationNames {
+  threadName: string;
+  branchName: string;
+}
+
 function sanitizeThreadName(name: string): string {
-  const cleaned = name
+  return name
     .replace(/[\r\n]+/g, " ")
     .replace(/[\\`*_~|<>]/g, "")
-    .trim();
-
-  if (!cleaned) {
-    return "";
-  }
-
-  if (cleaned.length <= CODEX.THREAD_NAME_MAX_LENGTH) {
-    return cleaned;
-  }
-  return cleaned.slice(0, CODEX.THREAD_NAME_MAX_LENGTH);
+    .trim()
+    .slice(0, CODEX.THREAD_NAME_MAX_LENGTH);
 }
 
-function fallbackThreadName(firstMessage: string): string {
-  const line = firstMessage
-    .split(/\r?\n/)
-    .map((part) => part.trim())
-    .find((part) => part.length > 0) ?? "";
-  return sanitizeThreadName(line);
+function sanitizeBranchSlug(slug: string): string {
+  return slug
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/g, "");
 }
 
-export async function generateThreadNameWithCodex(
+export function parseConversationNames(
+  output: string,
+): Result<ConversationNames, string> {
+  const start = output.indexOf("{");
+  const end = output.lastIndexOf("}");
+  if (start < 0 || end <= start) return err("metadata is not JSON");
+
+  try {
+    const value = JSON.parse(output.slice(start, end + 1)) as Record<
+      string,
+      unknown
+    >;
+    if (
+      typeof value.threadName !== "string" ||
+      typeof value.branchPrefix !== "string" ||
+      typeof value.branchSlug !== "string"
+    ) {
+      return err("metadata fields are missing");
+    }
+
+    const threadName = sanitizeThreadName(value.threadName);
+    const prefix = value.branchPrefix.trim().toLowerCase();
+    const slug = sanitizeBranchSlug(value.branchSlug);
+    if (!threadName || !BRANCH_PREFIXES.has(prefix) || !slug) {
+      return err("metadata fields are invalid");
+    }
+    return ok({ threadName, branchName: `${prefix}/${slug}` });
+  } catch (error) {
+    return err((error as Error).message);
+  }
+}
+
+export async function generateConversationNamesWithCodex(
   firstMessage: string,
+  firstResponse: string,
   repositoryName?: string,
   cwd?: string,
-): Promise<Result<string, string>> {
+  model: string = CODEX.THREAD_METADATA_MODEL,
+): Promise<Result<ConversationNames, string>> {
   const prompt = [
-    "あなたはDiscordスレッド名を生成するアシスタントです。",
-    "以下のユーザー要求を30文字以内の日本語タイトルに要約してください。",
-    "出力はタイトル文字列のみ。説明文や引用符は禁止。",
-    repositoryName ? `参考リポジトリ: ${repositoryName}` : "",
+    "Discord上の開発会話を要約し、名前を決めてください。",
+    "JSON以外は出力しないでください。",
+    '{"threadName":"30文字以内の明確な日本語タイトル","branchPrefix":"feat|fix|docs|refactor|test|chore|perf|build|ci","branchSlug":"英小文字と数字のkebab-case"}',
+    "branchPrefixとbranchSlugから作業目的が一目で分かるようにしてください。",
+    repositoryName ? `リポジトリ: ${repositoryName}` : "",
     "",
-    `ユーザー要求: ${firstMessage}`,
+    `ユーザー:\n${firstMessage}`,
+    "",
+    `Codex:\n${firstResponse}`,
   ].filter(Boolean).join("\n");
 
-  const args = [...CODEX.BASE_ARGS, prompt];
   const command = new Deno.Command(CODEX.COMMAND, {
-    args,
+    args: [
+      "exec",
+      "--json",
+      "--color",
+      "never",
+      "--ephemeral",
+      "--sandbox",
+      "read-only",
+      "--config",
+      'model_reasoning_effort="low"',
+      "--model",
+      model,
+      prompt,
+    ],
     cwd,
     stdout: "piped",
     stderr: "piped",
@@ -53,33 +112,20 @@ export async function generateThreadNameWithCodex(
     const stdout = await new Response(process.stdout).text();
     const { code, stderr } = await process.output();
     if (code !== 0) {
-      const stderrText = new TextDecoder().decode(stderr);
-      const fallback = fallbackThreadName(firstMessage);
-      if (fallback) return ok(fallback);
-      return err(stderrText || "thread name generation failed");
+      return err(
+        new TextDecoder().decode(stderr) || "metadata generation failed",
+      );
     }
 
     const processor = new CodexStreamProcessor();
     let candidate = "";
     for (const line of stdout.split("\n")) {
       const parsed = processor.parseLine(line);
-      if (parsed.finalText) {
-        candidate = parsed.finalText;
-      } else if (parsed.text && !candidate) {
-        candidate = parsed.text;
-      }
+      if (parsed.finalText) candidate = parsed.finalText;
+      else if (parsed.text && !candidate) candidate = parsed.text;
     }
-
-    const finalName = sanitizeThreadName(candidate);
-    if (!finalName) {
-      const fallback = fallbackThreadName(firstMessage);
-      if (fallback) return ok(fallback);
-      return err("empty thread name");
-    }
-    return ok(finalName);
+    return parseConversationNames(candidate);
   } catch (error) {
-    const fallback = fallbackThreadName(firstMessage);
-    if (fallback) return ok(fallback);
     return err((error as Error).message);
   }
 }
