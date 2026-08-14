@@ -1,8 +1,16 @@
 import { assertEquals } from "std/assert/mod.ts";
 import {
+  fallbackThreadName,
   generateConversationNamesWithCodex,
   parseConversationNames,
 } from "../src/thread-namer.ts";
+
+Deno.test("fallbackThreadName: 最初の空でない行を正規化する", () => {
+  assertEquals(
+    fallbackThreadName("\n  **タイトル生成** を直したい\n詳細"),
+    "タイトル生成 を直したい",
+  );
+});
 
 Deno.test("parseConversationNames: 名前を正規化する", () => {
   const result = parseConversationNames(`\`\`\`json
@@ -53,6 +61,41 @@ Deno.test("generateConversationNamesWithCodex: stdoutを一度だけ回収する
       threadName: "タイトル生成修正",
       branchName: "fix/collect-stdout-once",
     });
+  } finally {
+    if (originalPath === undefined) Deno.env.delete("PATH");
+    else Deno.env.set("PATH", originalPath);
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("generateConversationNamesWithCodex: 失敗を最大3回試す", async () => {
+  const dir = await Deno.makeTempDir();
+  const originalPath = Deno.env.get("PATH");
+  try {
+    const calls = `${dir}/calls`;
+    const fakeCodex = `${dir}/codex`;
+    await Deno.writeTextFile(
+      fakeCodex,
+      `#!/bin/sh\nprintf x >> '${calls}'\nprintf failure >&2\nexit 1\n`,
+    );
+    await Deno.chmod(fakeCodex, 0o755);
+    Deno.env.set("PATH", `${dir}:${originalPath ?? ""}`);
+
+    const failures: number[] = [];
+    const result = await generateConversationNamesWithCodex(
+      "依頼",
+      "回答",
+      undefined,
+      dir,
+      undefined,
+      (_error, attempt) => {
+        failures.push(attempt);
+      },
+    );
+
+    assertEquals(result.isErr(), true);
+    assertEquals(await Deno.readTextFile(calls), "xxx");
+    assertEquals(failures, [1, 2, 3]);
   } finally {
     if (originalPath === undefined) Deno.env.delete("PATH");
     else Deno.env.set("PATH", originalPath);
