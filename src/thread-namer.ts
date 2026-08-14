@@ -108,9 +108,7 @@ export async function generateConversationNamesWithCodex(
   });
 
   try {
-    const process = command.spawn();
-    const stdout = await new Response(process.stdout).text();
-    const { code, stderr } = await process.output();
+    const { code, stdout, stderr } = await command.output();
     if (code !== 0) {
       return err(
         new TextDecoder().decode(stderr) || "metadata generation failed",
@@ -119,7 +117,7 @@ export async function generateConversationNamesWithCodex(
 
     const processor = new CodexStreamProcessor();
     let candidate = "";
-    for (const line of stdout.split("\n")) {
+    for (const line of new TextDecoder().decode(stdout).split("\n")) {
       const parsed = processor.parseLine(line);
       if (parsed.finalText) candidate = parsed.finalText;
       else if (parsed.text && !candidate) candidate = parsed.text;
