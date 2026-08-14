@@ -37,12 +37,12 @@ export function fallbackThreadName(firstMessage: string): string {
 }
 
 function sanitizeBranchSlug(slug: string): string {
-  return slug
+  const normalized = slug
+    .normalize("NFKC")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48)
-    .replace(/-+$/g, "");
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+  return [...normalized].slice(0, 48).join("").replace(/-+$/g, "");
 }
 
 export function parseConversationNames(
@@ -83,12 +83,17 @@ export async function generateConversationNamesWithCodex(
   repositoryName?: string,
   cwd?: string,
   model: string = CODEX.THREAD_METADATA_MODEL,
+  namingInstructions?: string,
   onFailure?: (error: string, attempt: number) => void | Promise<void>,
 ): Promise<Result<ConversationNames, string>> {
   const prompt = [
     "Discord上の開発会話を要約し、名前を決めてください。",
+    "命名に関する指示:",
+    namingInstructions?.trim() ||
+    "threadNameは日本語、branchSlugは英語で作成してください。",
+    "以下の出力制約は必ず守ってください。",
     "JSON以外は出力しないでください。",
-    '{"threadName":"30文字以内の明確な日本語タイトル","branchPrefix":"feat|fix|docs|refactor|test|chore|perf|build|ci","branchSlug":"英小文字と数字のkebab-case"}',
+    '{"threadName":"30文字以内の明確なタイトル","branchPrefix":"feat|fix|docs|refactor|test|chore|perf|build|ci","branchSlug":"スラッシュ以降の短いタイトル"}',
     "branchPrefixとbranchSlugから作業目的が一目で分かるようにしてください。",
     repositoryName ? `リポジトリ: ${repositoryName}` : "",
     "",

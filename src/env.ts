@@ -6,6 +6,7 @@ export interface Env {
   CODEX_APPEND_SYSTEM_PROMPT?: string;
   CODEX_STATUS_TIME_ZONE?: string;
   CODEX_THREAD_NAMING_MODEL?: string;
+  CODEX_THREAD_NAMING_INSTRUCTIONS?: string;
 }
 
 /**
@@ -40,6 +41,9 @@ export function getEnv(): Result<Env, EnvError> {
   const codexAppendSystemPrompt = Deno.env.get("CODEX_APPEND_SYSTEM_PROMPT");
   const codexStatusTimeZone = Deno.env.get("CODEX_STATUS_TIME_ZONE");
   const codexThreadNamingModel = Deno.env.get("CODEX_THREAD_NAMING_MODEL");
+  const codexThreadNamingInstructions = Deno.env.get(
+    "CODEX_THREAD_NAMING_INSTRUCTIONS",
+  );
 
   if (!token) {
     return err({
@@ -68,5 +72,6 @@ export function getEnv(): Result<Env, EnvError> {
     CODEX_APPEND_SYSTEM_PROMPT: codexAppendSystemPrompt,
     CODEX_STATUS_TIME_ZONE: codexStatusTimeZone,
     CODEX_THREAD_NAMING_MODEL: codexThreadNamingModel,
+    CODEX_THREAD_NAMING_INSTRUCTIONS: codexThreadNamingInstructions,
   });
 }
