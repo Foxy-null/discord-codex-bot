@@ -782,6 +782,7 @@ client.on(Events.MessageCreate, (message) => {
             threadInfo.repositoryFullName ?? undefined,
             workerState.worktreePath,
             env.CODEX_THREAD_NAMING_MODEL,
+            env.CODEX_THREAD_NAMING_INSTRUCTIONS,
             async (error, attempt) => {
               console.error(
                 `[ThreadRename] metadata generation failed (attempt ${attempt})`,

@@ -7,6 +7,10 @@ Deno.test("getEnv: 必須環境変数がある場合に成功する", () => {
   Deno.env.set("CODEX_APPEND_SYSTEM_PROMPT", "system prompt");
   Deno.env.set("CODEX_STATUS_TIME_ZONE", "Asia/Tokyo");
   Deno.env.set("CODEX_THREAD_NAMING_MODEL", "gpt-5.6-luna");
+  Deno.env.set(
+    "CODEX_THREAD_NAMING_INSTRUCTIONS",
+    "threadNameは英語で作成してください",
+  );
 
   const env = getEnv();
   if (env.isErr()) {
@@ -16,6 +20,10 @@ Deno.test("getEnv: 必須環境変数がある場合に成功する", () => {
   assertEquals(env.value.CODEX_APPEND_SYSTEM_PROMPT, "system prompt");
   assertEquals(env.value.CODEX_STATUS_TIME_ZONE, "Asia/Tokyo");
   assertEquals(env.value.CODEX_THREAD_NAMING_MODEL, "gpt-5.6-luna");
+  assertEquals(
+    env.value.CODEX_THREAD_NAMING_INSTRUCTIONS,
+    "threadNameは英語で作成してください",
+  );
 });
 
 Deno.test("getEnv: WORK_BASE_DIRのチルダをHOMEに展開する", () => {
