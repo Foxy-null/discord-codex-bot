@@ -13,6 +13,7 @@ const BRANCH_PREFIXES = new Set([
   "build",
   "ci",
 ]);
+const MAX_GENERATION_ATTEMPTS = 3;
 
 export interface ConversationNames {
   threadName: string;
@@ -25,6 +26,14 @@ function sanitizeThreadName(name: string): string {
     .replace(/[\\`*_~|<>]/g, "")
     .trim()
     .slice(0, CODEX.THREAD_NAME_MAX_LENGTH);
+}
+
+export function fallbackThreadName(firstMessage: string): string {
+  const line = firstMessage
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find(Boolean) ?? "";
+  return sanitizeThreadName(line);
 }
 
 function sanitizeBranchSlug(slug: string): string {
@@ -74,6 +83,7 @@ export async function generateConversationNamesWithCodex(
   repositoryName?: string,
   cwd?: string,
   model: string = CODEX.THREAD_METADATA_MODEL,
+  onFailure?: (error: string, attempt: number) => void | Promise<void>,
 ): Promise<Result<ConversationNames, string>> {
   const prompt = [
     "Discord上の開発会話を要約し、名前を決めてください。",
@@ -107,23 +117,28 @@ export async function generateConversationNamesWithCodex(
     stderr: "piped",
   });
 
-  try {
-    const { code, stdout, stderr } = await command.output();
-    if (code !== 0) {
-      return err(
-        new TextDecoder().decode(stderr) || "metadata generation failed",
-      );
+  let lastError = "metadata generation failed";
+  for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+    try {
+      const { code, stdout, stderr } = await command.output();
+      if (code !== 0) {
+        lastError = new TextDecoder().decode(stderr) || lastError;
+      } else {
+        const processor = new CodexStreamProcessor();
+        let candidate = "";
+        for (const line of new TextDecoder().decode(stdout).split("\n")) {
+          const parsed = processor.parseLine(line);
+          if (parsed.finalText) candidate = parsed.finalText;
+          else if (parsed.text && !candidate) candidate = parsed.text;
+        }
+        const parsed = parseConversationNames(candidate);
+        if (parsed.isOk()) return parsed;
+        lastError = parsed.error;
+      }
+    } catch (error) {
+      lastError = (error as Error).message;
     }
-
-    const processor = new CodexStreamProcessor();
-    let candidate = "";
-    for (const line of new TextDecoder().decode(stdout).split("\n")) {
-      const parsed = processor.parseLine(line);
-      if (parsed.finalText) candidate = parsed.finalText;
-      else if (parsed.text && !candidate) candidate = parsed.text;
-    }
-    return parseConversationNames(candidate);
-  } catch (error) {
-    return err((error as Error).message);
+    await onFailure?.(lastError, attempt);
   }
+  return err(lastError);
 }

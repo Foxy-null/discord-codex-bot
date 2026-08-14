@@ -45,7 +45,10 @@ import {
   checkSystemRequirements,
   formatSystemCheckResults,
 } from "./system-check.ts";
-import { generateConversationNamesWithCodex } from "./thread-namer.ts";
+import {
+  fallbackThreadName,
+  generateConversationNamesWithCodex,
+} from "./thread-namer.ts";
 import { formatDiscordSendLog } from "./utils/discord-log.ts";
 import { splitIntoDiscordChunks } from "./utils/discord-message.ts";
 import { WorkspaceManager } from "./workspace/workspace.ts";
@@ -771,20 +774,42 @@ client.on(Events.MessageCreate, (message) => {
         const threadInfo = await workspaceManager.loadThreadInfo(threadId);
         const workerState = await workspaceManager.loadWorkerState(threadId);
         if (threadInfo && workerState?.worktreePath) {
+          const canAutoRename = DEFAULT_THREAD_NAME_PATTERN.test(thread.name);
+          let fallbackName = "";
           const names = await generateConversationNamesWithCodex(
             message.content,
             replyContent,
             threadInfo.repositoryFullName ?? undefined,
             workerState.worktreePath,
             env.CODEX_THREAD_NAMING_MODEL,
+            async (error, attempt) => {
+              console.error(
+                `[ThreadRename] metadata generation failed (attempt ${attempt})`,
+                error,
+              );
+
+              if (attempt === 1 && canAutoRename) {
+                fallbackName = fallbackThreadName(message.content);
+                if (fallbackName) {
+                  await thread.setName(fallbackName).then(() => {
+                    threadInfo.autoRenamedByFirstMessage = true;
+                  }).catch((error) =>
+                    console.error(
+                      "[ThreadRename] fallback rename failed",
+                      error,
+                    )
+                  );
+                }
+              }
+            },
           );
-          if (names.isErr()) {
-            console.error(
-              "[ThreadRename] metadata generation failed",
-              names.error,
-            );
-          } else {
-            if (DEFAULT_THREAD_NAME_PATTERN.test(thread.name)) {
+
+          if (names.isOk()) {
+            if (
+              canAutoRename &&
+              (DEFAULT_THREAD_NAME_PATTERN.test(thread.name) ||
+                thread.name === fallbackName)
+            ) {
               await thread.setName(names.value.threadName).catch((error) =>
                 console.error("[ThreadRename] Discord rename failed", error)
               );
