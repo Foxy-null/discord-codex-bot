@@ -36,12 +36,19 @@ import {
 import { type CodexUpdateError, updateCodexCli } from "./codex-update.ts";
 import { MESSAGES } from "./constants.ts";
 import { getEnv } from "./env.ts";
-import { ensureRepository, parseRepository } from "./git-utils.ts";
+import {
+  ensureRepository,
+  parseRepository,
+  renameInitialBranch,
+} from "./git-utils.ts";
 import {
   checkSystemRequirements,
   formatSystemCheckResults,
 } from "./system-check.ts";
-import { generateThreadNameWithCodex } from "./thread-namer.ts";
+import {
+  fallbackThreadName,
+  generateConversationNamesWithCodex,
+} from "./thread-namer.ts";
 import { formatDiscordSendLog } from "./utils/discord-log.ts";
 import { splitIntoDiscordChunks } from "./utils/discord-message.ts";
 import { WorkspaceManager } from "./workspace/workspace.ts";
@@ -642,32 +649,17 @@ client.on(Events.MessageCreate, (message) => {
       return;
     }
 
+    let isFirstUserMessage = false;
     try {
       const threadInfo = await workspaceManager.loadThreadInfo(threadId);
       if (threadInfo && !threadInfo.firstUserMessageReceivedAt) {
+        isFirstUserMessage = true;
         threadInfo.firstUserMessageReceivedAt = new Date().toISOString();
         threadInfo.autoRenamedByFirstMessage = false;
-
-        if (
-          message.content.trim().length > 0 &&
-          DEFAULT_THREAD_NAME_PATTERN.test(thread.name)
-        ) {
-          const workerState = await workspaceManager.loadWorkerState(threadId);
-          const renameResult = await generateThreadNameWithCodex(
-            message.content,
-            threadInfo.repositoryFullName ?? undefined,
-            workerState?.worktreePath ?? undefined,
-          );
-          if (renameResult.isOk()) {
-            await thread.setName(renameResult.value).catch(() => {});
-            threadInfo.autoRenamedByFirstMessage = true;
-          }
-        }
-
         await workspaceManager.saveThreadInfo(threadInfo);
       }
     } catch (error) {
-      console.error("[ThreadRename] first-message rename failed", error);
+      console.error("[ThreadRename] first-message tracking failed", error);
     }
 
     let lastProgressMessageUrl: string | null = null;
@@ -775,6 +767,70 @@ client.on(Events.MessageCreate, (message) => {
     await replyToThreadMessage(message, chunks[0]);
     for (const chunk of chunks.slice(1)) {
       await sendThreadMessage(thread, chunk);
+    }
+
+    if (isFirstUserMessage && message.content.trim()) {
+      try {
+        const threadInfo = await workspaceManager.loadThreadInfo(threadId);
+        const workerState = await workspaceManager.loadWorkerState(threadId);
+        if (threadInfo && workerState?.worktreePath) {
+          const canAutoRename = DEFAULT_THREAD_NAME_PATTERN.test(thread.name);
+          let fallbackName = "";
+          const names = await generateConversationNamesWithCodex(
+            message.content,
+            replyContent,
+            threadInfo.repositoryFullName ?? undefined,
+            workerState.worktreePath,
+            env.CODEX_THREAD_NAMING_MODEL,
+            env.CODEX_THREAD_NAMING_INSTRUCTIONS,
+            async (error, attempt) => {
+              console.error(
+                `[ThreadRename] metadata generation failed (attempt ${attempt})`,
+                error,
+              );
+
+              if (attempt === 1 && canAutoRename) {
+                fallbackName = fallbackThreadName(message.content);
+                if (fallbackName) {
+                  await thread.setName(fallbackName).then(() => {
+                    threadInfo.autoRenamedByFirstMessage = true;
+                  }).catch((error) =>
+                    console.error(
+                      "[ThreadRename] fallback rename failed",
+                      error,
+                    )
+                  );
+                }
+              }
+            },
+          );
+
+          if (names.isOk()) {
+            if (
+              canAutoRename &&
+              (DEFAULT_THREAD_NAME_PATTERN.test(thread.name) ||
+                thread.name === fallbackName)
+            ) {
+              await thread.setName(names.value.threadName).catch((error) =>
+                console.error("[ThreadRename] Discord rename failed", error)
+              );
+            }
+            const branch = await renameInitialBranch(
+              workerState.worktreePath,
+              workerState.workerName,
+              names.value.branchName,
+              threadId,
+            );
+            if (branch.isErr()) {
+              console.error("[ThreadRename] Git rename failed", branch.error);
+            }
+            threadInfo.autoRenamedByFirstMessage = true;
+          }
+          await workspaceManager.saveThreadInfo(threadInfo);
+        }
+      } catch (error) {
+        console.error("[ThreadRename] post-response rename failed", error);
+      }
     }
   });
 });

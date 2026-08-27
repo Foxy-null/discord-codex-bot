@@ -14,6 +14,7 @@ export const CODEX = {
     "--dangerously-bypass-approvals-and-sandbox",
   ] as const,
   THREAD_NAME_MAX_LENGTH: 30,
+  THREAD_METADATA_MODEL: "gpt-5.6-luna",
 } as const;
 
 export const PROCESS = {

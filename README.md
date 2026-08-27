@@ -110,6 +110,8 @@ deno task start
 DISCORD_TOKEN=your_discord_bot_token_here
 WORK_BASE_DIR=/absolute/path/to/codex-bot-work
 CODEX_STATUS_TIME_ZONE=Asia/Tokyo
+CODEX_THREAD_NAMING_MODEL=gpt-5.6-luna
+CODEX_THREAD_NAMING_INSTRUCTIONS="threadNameは日本語、branchSlugは英語で作成してください"
 ```
 
 `WORK_BASE_DIR` は絶対パスを推奨します。`.env` 内の `~`
@@ -118,12 +120,14 @@ CODEX_STATUS_TIME_ZONE=Asia/Tokyo
 
 ## 環境変数
 
-| 変数                         | 必須 | 説明                                                                     |
-| ---------------------------- | ---- | ------------------------------------------------------------------------ |
-| `DISCORD_TOKEN`              | 必須 | Discord Bot Token。                                                      |
-| `WORK_BASE_DIR`              | 必須 | Bot がリポジトリ、作業コピー、スレッド状態、ログを保存するディレクトリ。 |
-| `CODEX_APPEND_SYSTEM_PROMPT` | 任意 | Codex CLI に渡す追加システムプロンプト。Bot 全体で共通適用されます。     |
-| `CODEX_STATUS_TIME_ZONE`     | 任意 | Codex limit reset 時刻の表示タイムゾーン。例: `Asia/Tokyo`。             |
+| 変数                               | 必須 | 説明                                                                      |
+| ---------------------------------- | ---- | ------------------------------------------------------------------------- |
+| `DISCORD_TOKEN`                    | 必須 | Discord Bot Token。                                                       |
+| `WORK_BASE_DIR`                    | 必須 | Bot がリポジトリ、作業コピー、スレッド状態、ログを保存するディレクトリ。  |
+| `CODEX_APPEND_SYSTEM_PROMPT`       | 任意 | Codex CLI に渡す追加システムプロンプト。Bot 全体で共通適用されます。      |
+| `CODEX_STATUS_TIME_ZONE`           | 任意 | Codex limit reset 時刻の表示タイムゾーン。例: `Asia/Tokyo`。              |
+| `CODEX_THREAD_NAMING_MODEL`        | 任意 | 初回応答後のスレッド・ブランチ名生成モデル。既定: `gpt-5.6-luna`。        |
+| `CODEX_THREAD_NAMING_INSTRUCTIONS` | 任意 | スレッド名と `/` 以降のブランチ名について、言語や表現を指定する追加指示。 |
 
 ## 詳しい使い方
 
@@ -145,6 +149,8 @@ Bot は対象リポジトリを `WORK_BASE_DIR/repositories/` に clone
 
 作成されたスレッドに通常の Discord メッセージを投稿します。Bot はその内容を
 Codex CLI に渡し、進捗と応答を同じスレッドへ返します。
+初回応答の送信後、会話内容を要約して Discord スレッド名と作業ブランチ名を
+自動更新します。
 
 画像添付がある場合、Bot は添付ファイルを `WORK_BASE_DIR/attachments/`
 に保存し、対応する画像パスを Codex CLI の `--image` として渡します。

@@ -139,6 +139,79 @@ export function generateBranchName(workerName: string): string {
   return `worker/${date}/worker-${hh}${mm}${ss}-${workerName}`;
 }
 
+async function runGit(
+  cwd: string,
+  args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const result = await new Deno.Command("git", {
+    args,
+    cwd,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const decoder = new TextDecoder();
+  return {
+    code: result.code,
+    stdout: decoder.decode(result.stdout).trim(),
+    stderr: decoder.decode(result.stderr).trim(),
+  };
+}
+
+export async function renameInitialBranch(
+  worktreePath: string,
+  workerName: string,
+  desiredBranch: string,
+  collisionSuffix: string,
+): Promise<Result<string | null, GitUtilsError>> {
+  const current = await runGit(worktreePath, ["branch", "--show-current"]);
+  if (current.code !== 0) {
+    return err({
+      type: "COMMAND_EXECUTION_FAILED",
+      command: "git branch --show-current",
+      error: current.stderr,
+    });
+  }
+  if (
+    !new RegExp(
+      `^worker/\\d{4}-\\d{2}-\\d{2}/worker-\\d{6}-${workerName}$`,
+    ).test(current.stdout)
+  ) {
+    return ok(null);
+  }
+
+  const valid = await runGit(worktreePath, [
+    "check-ref-format",
+    "--branch",
+    desiredBranch,
+  ]);
+  if (valid.code !== 0) {
+    return err({
+      type: "COMMAND_EXECUTION_FAILED",
+      command: "git check-ref-format --branch",
+      error: valid.stderr,
+    });
+  }
+
+  const exists = await runGit(worktreePath, [
+    "show-ref",
+    "--verify",
+    "--quiet",
+    `refs/heads/${desiredBranch}`,
+  ]);
+  const branchName = exists.code === 0
+    ? `${desiredBranch}-${collisionSuffix.slice(0, 8)}`
+    : desiredBranch;
+  const renamed = await runGit(worktreePath, ["branch", "-m", branchName]);
+  if (renamed.code !== 0) {
+    return err({
+      type: "COMMAND_EXECUTION_FAILED",
+      command: "git branch -m",
+      error: renamed.stderr,
+    });
+  }
+  return ok(branchName);
+}
+
 export async function createWorktreeCopy(
   repositoryPath: string,
   workerName: string,
