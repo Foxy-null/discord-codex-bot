@@ -19,6 +19,7 @@ export class WorkerManager {
 
   async createWorker(
     threadId: string,
+    autoPush = true,
   ): Promise<Result<IWorker, WorkerManagerError>> {
     const existing = this.workers.get(threadId);
     if (existing) return ok(existing);
@@ -30,6 +31,7 @@ export class WorkerManager {
       status: "active",
       createdAt: now,
       lastActiveAt: now,
+      autoPush,
     };
 
     const worker = new Worker(
