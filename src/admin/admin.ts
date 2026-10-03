@@ -69,10 +69,12 @@ export class Admin implements IAdmin {
 
   async createWorker(
     threadId: string,
+    autoPush = true,
     commitPrLanguage?: string | null,
   ): Promise<Result<IWorker, AdminError>> {
     const result = await this.workerManager.createWorker(
       threadId,
+      autoPush,
       commitPrLanguage,
     );
     if (result.isErr()) {

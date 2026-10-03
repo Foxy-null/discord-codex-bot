@@ -46,6 +46,93 @@ class FakeCodexExecutor implements CodexCommandExecutor {
   }
 }
 
+Deno.test("Worker: 自動プッシュは有効設定の正常終了後のみ許可する", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const workspace = new WorkspaceManager(dir);
+    await workspace.initialize();
+    const now = new Date().toISOString();
+    const scenarios = [
+      {
+        autoPush: true,
+        isPlanMode: false,
+        code: 0,
+        abort: false,
+        expected: true,
+      },
+      {
+        autoPush: false,
+        isPlanMode: false,
+        code: 0,
+        abort: false,
+        expected: false,
+      },
+      {
+        autoPush: undefined,
+        isPlanMode: false,
+        code: 0,
+        abort: false,
+        expected: false,
+      },
+      {
+        autoPush: true,
+        isPlanMode: true,
+        code: 0,
+        abort: false,
+        expected: false,
+      },
+      {
+        autoPush: true,
+        isPlanMode: false,
+        code: 1,
+        abort: false,
+        expected: false,
+      },
+      {
+        autoPush: true,
+        isPlanMode: false,
+        code: 0,
+        abort: true,
+        expected: false,
+      },
+    ];
+    for (const scenario of scenarios) {
+      const state: WorkerState = {
+        workerName: "test",
+        threadId: "thread-1",
+        repository: { fullName: "owner/repo", org: "owner", repo: "repo" },
+        worktreePath: dir,
+        status: "active",
+        createdAt: now,
+        lastActiveAt: now,
+        autoPush: scenario.autoPush,
+        isPlanMode: scenario.isPlanMode,
+      };
+      const executor: CodexCommandExecutor = scenario.abort
+        ? {
+          executeStreaming: async () => {
+            throw new DOMException("Stopped", "AbortError");
+          },
+        }
+        : new FakeCodexExecutor([], "done", scenario.code);
+      const worker = new Worker(state, workspace, executor);
+      assertEquals(worker.shouldAutoPush(), false);
+      await worker.processMessage("依頼");
+      assertEquals(
+        worker.shouldAutoPush(),
+        scenario.expected,
+        JSON.stringify(scenario),
+      );
+      // A failed next request must clear the previous success.
+      state.worktreePath = null;
+      assertEquals((await worker.processMessage("次の依頼")).isErr(), true);
+      assertEquals(worker.shouldAutoPush(), false);
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("Worker: 最終応答候補のagent_messageも進捗として送信する", async () => {
   const baseDir = await createTestDir("worker_test_");
   const worktreePath = await createTestDir("worker_worktree_");

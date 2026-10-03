@@ -16,15 +16,20 @@ CLI へ渡します。Codex の途中出力と最終応答は Discord
 - Codex の JSON ストリームを Discord 向けに整形して返信
 - 実行中 Codex の中断、プランモード、スレッドのクローズ
 - Bot 再起動後のアクティブスレッド復旧
+- 応答完了後に作業ブランチのコミットを自動プッシュ
 
 ## Codex BOT 使い方
 
 Bot を使う人向けの基本操作だよ。
 
-- `/start repository:<GitHubの名前/レポジトリ名>`:
+- `/start repository:<GitHubの名前/レポジトリ名> auto_push:<true|false> language:<言語>`:
   作業用スレッドを作るよ。レポジトリをクローンしてそのスレッド専用の作業用フォルダを作り
   Codex がその中で依頼を実行するよ。
   - 例: `/start repository:pikachu0310/discord-codex-bot`
+  - `auto_push` は省略可能で、既定値は `true`。各依頼の正常終了後に、
+    コミット済みの変更を自動プッシュするよ。サーバー上の作業内容を別環境で取得して確認できるよ。
+  - 自動プッシュを無効にする例:
+    `/start repository:pikachu0310/discord-codex-bot auto_push:false`
   - 任意の `language`
     でコミットメッセージ・PRタイトル・PR本文の言語を共通指定できるよ。 例:
     `/start repository:owner/repo language:en`。
@@ -159,14 +164,31 @@ Discord の通常チャンネルで次を実行します。
 この指定はコミット・PRにのみ適用し、Botの応答やスレッド・ブランチ名の言語設定には影響しません。
 言語方針は各依頼とともにCodexへ渡します。
 
-現在の引数順は `repository` → `language` です。
-自動プッシュ引数を追加する際は、その直後に `language` を配置します。
+引数順は `repository` → `auto_push` → `language` です。 `auto_push` と
+`language` はどちらも省略できます。両方を指定する例:
+
+```text
+/start repository:owner/repo auto_push:false language:en
+```
 
 Bot は対象リポジトリを `WORK_BASE_DIR/repositories/` に clone
 します。すでに存在する場合は fetch
 してデフォルトブランチへ更新します。その後、Discord
 スレッドを作成し、スレッド専用の作業コピーを `WORK_BASE_DIR/worktrees/`
 に用意します。
+
+第 2 引数の `auto_push` は省略可能な boolean で、既定値は `true` です。
+設定はスレッドごとに保存され、Bot の再起動後も維持されます。
+この機能の追加前に作成したスレッドは、自動プッシュ無効のまま復旧します。
+
+自動プッシュが有効な場合、初回のブランチ改名後を含め、各依頼の正常終了後に
+作業ブランチを `origin`
+へプッシュします。既定ブランチへのプッシュや強制プッシュは行わず、 Codex
+の失敗・中断・プランモードでは自動プッシュを実行しません。
+送信先リポジトリへの書き込み権限が必要です。
+
+自動コミットは行いません。未コミットの変更は別環境に反映されないため、 Discord
+に通知します。プッシュに失敗した場合も通知し、作業内容はローカルに残します。
 
 ### 2. スレッドへ依頼を書く
 
@@ -188,14 +210,14 @@ Codex CLI に渡し、進捗と応答を同じスレッドへ返します。
 
 ## スラッシュコマンド
 
-| コマンド                       | 実行場所       | 説明                                                                               |
-| ------------------------------ | -------------- | ---------------------------------------------------------------------------------- |
-| `/start repository:owner/repo` | 通常チャンネル | リポジトリを準備し、新しい作業スレッドを作ります。                                 |
-| `/stop`                        | 作業スレッド   | 実行中の Codex プロセスを中断します。                                              |
-| `/plan`                        | 作業スレッド   | 次回以降の依頼で、実装前に計画を返すよう Codex へ指示します。                      |
-| `/status`                      | どこでも       | Codex の 5h / Weekly limit を確認します。                                          |
-| `/active-threads`              | どこでも       | 現在アクティブな作業スレッドから、実行者宛てに silent mention を送ります。         |
-| `/close`                       | 作業スレッド   | Worker を終了し、Discord スレッドをクローズします。Manage Threads 権限が必要です。 |
+| コマンド                                      | 実行場所       | 説明                                                                                             |
+| --------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------ |
+| `/start repository:owner/repo auto_push:true` | 通常チャンネル | リポジトリを準備し、新しい作業スレッドを作ります。`auto_push` は省略可能で既定値は `true` です。 |
+| `/stop`                                       | 作業スレッド   | 実行中の Codex プロセスを中断します。                                                            |
+| `/plan`                                       | 作業スレッド   | 次回以降の依頼で、実装前に計画を返すよう Codex へ指示します。                                    |
+| `/status`                                     | どこでも       | Codex の 5h / Weekly limit を確認します。                                                        |
+| `/active-threads`                             | どこでも       | 現在アクティブな作業スレッドから、実行者宛てに silent mention を送ります。                       |
+| `/close`                                      | 作業スレッド   | Worker を終了し、Discord スレッドをクローズします。Manage Threads 権限が必要です。               |
 
 `/start` の repository 入力は、すでに Bot
 が取得済みのローカルリポジトリを候補としてオートコンプリートします。
@@ -300,8 +322,9 @@ repository を扱う場合は、Bot 実行ユーザーの Git
 
 ## 関連ドキュメント
 
-- `CONTEXT.md`: 作業スレッドとコミット・PR言語の用語
+- `CONTEXT.md`: 作業スレッド、自動プッシュ、コミット・PR言語の用語
 - `docs/discord.md`: Discord.js 連携メモ
 - `docs/autocomplete.md`: `/start` オートコンプリート調査メモ
 - `docs/CODEX.md`: 過去のアーキテクチャメモ
 - `docs/rearchitecture-spec-v2.md`: 再設計仕様メモ
+- `docs/adr/0001-default-auto-push.md`: 自動プッシュの既定値と送信範囲の判断

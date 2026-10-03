@@ -51,11 +51,16 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
     ];
     for (const [index, language] of languages.entries()) {
       const threadId = `language-${index}`;
-      assertEquals((await admin.createWorker(threadId, language)).isOk(), true);
+      const autoPush = index % 2 === 0;
+      assertEquals(
+        (await admin.createWorker(threadId, autoPush, language)).isOk(),
+        true,
+      );
       const state = await workspace.loadWorkerState(threadId);
       assertExists(state);
       const expectedLanguage = language?.trim() || null;
       assertEquals(state.commitPrLanguage, expectedLanguage);
+      assertEquals(state.autoPush, autoPush);
 
       // 言語フィールドのない既存スレッドも復旧対象にする。
       if (language === undefined) delete state.commitPrLanguage;
@@ -83,6 +88,10 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
         assertEquals(
           (await restored.routeMessage(threadId, request)).isOk(),
           true,
+        );
+        assertEquals(
+          restored.getWorker(threadId)._unsafeUnwrap().shouldAutoPush(),
+          autoPush && turn < 2,
         );
         const args = (await Deno.readTextFile(`${baseDir}/codex-args`))
           .split("\0").filter(Boolean);
@@ -117,5 +126,39 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
     if (originalPath === undefined) Deno.env.delete("PATH");
     else Deno.env.set("PATH", originalPath);
     await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Admin: 自動プッシュは新規で既定true、falseも保存・復元する", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const workspace = new WorkspaceManager(dir);
+    await workspace.initialize();
+    const admin = Admin.fromState(null, workspace);
+    (await admin.createWorker("default"))._unsafeUnwrap();
+    (await admin.createWorker("disabled", false))._unsafeUnwrap();
+
+    assertEquals((await workspace.loadWorkerState("default"))?.autoPush, true);
+    assertEquals(
+      (await workspace.loadWorkerState("disabled"))?.autoPush,
+      false,
+    );
+
+    const restored = Admin.fromState(
+      await workspace.loadAdminState(),
+      workspace,
+    );
+    (await restored.restoreActiveThreads())._unsafeUnwrap();
+    for (const threadId of ["default", "disabled"]) {
+      const worker = restored.getWorker(threadId)._unsafeUnwrap();
+      (await worker.save())._unsafeUnwrap();
+    }
+    assertEquals((await workspace.loadWorkerState("default"))?.autoPush, true);
+    assertEquals(
+      (await workspace.loadWorkerState("disabled"))?.autoPush,
+      false,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });

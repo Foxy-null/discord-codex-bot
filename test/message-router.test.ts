@@ -17,6 +17,7 @@ function createRouter(error: WorkerError): MessageRouter {
     },
     stopExecution: () => Promise.resolve(false),
     isPlanMode: () => false,
+    shouldAutoPush: () => false,
     setPlanMode: () => {},
   };
 
@@ -40,6 +41,7 @@ function createRejectingRouter(error: unknown): MessageRouter {
     },
     stopExecution: () => Promise.resolve(false),
     isPlanMode: () => false,
+    shouldAutoPush: () => false,
     setPlanMode: () => {},
   };
 

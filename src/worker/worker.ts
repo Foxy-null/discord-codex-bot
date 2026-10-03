@@ -72,6 +72,7 @@ export class Worker implements IWorker {
   private codexProcess: Deno.ChildProcess | null = null;
   private abortController: AbortController | null = null;
   private isExecuting = false;
+  private lastExecutionSucceeded = false;
 
   constructor(
     private state: WorkerState,
@@ -92,6 +93,7 @@ export class Worker implements IWorker {
     onProgress: (content: string) => Promise<void> = async () => {},
     onReaction?: (emoji: string) => Promise<void>,
   ): Promise<Result<string, WorkerError>> {
+    this.lastExecutionSucceeded = false;
     if (!this.state.repository || !this.state.worktreePath) {
       return err({ type: "REPOSITORY_NOT_SET" });
     }
@@ -106,7 +108,8 @@ export class Worker implements IWorker {
     );
 
     this.isExecuting = true;
-    this.abortController = new AbortController();
+    const abortController = new AbortController();
+    this.abortController = abortController;
     this.codexProcess = null;
 
     let newSessionId: string | null = null;
@@ -164,7 +167,7 @@ export class Worker implements IWorker {
         args,
         this.state.worktreePath,
         onData,
-        this.abortController.signal,
+        abortController.signal,
         (process) => {
           this.codexProcess = process;
         },
@@ -248,6 +251,7 @@ export class Worker implements IWorker {
 
       await this.saveRawCodexOutput(allOutput, this.state.sessionId);
       await this.save();
+      this.lastExecutionSucceeded = !abortController.signal.aborted;
 
       return ok(
         this.formatter.formatResponse(
@@ -559,6 +563,11 @@ export class Worker implements IWorker {
 
   isPlanMode(): boolean {
     return this.state.isPlanMode ?? false;
+  }
+
+  shouldAutoPush(): boolean {
+    return this.state.autoPush === true && this.lastExecutionSucceeded &&
+      !this.isPlanMode();
   }
 
   setPlanMode(planMode: boolean): void {

@@ -34,5 +34,6 @@ export interface IWorker {
     onProgress?: (content: string) => Promise<void>,
   ): Promise<boolean>;
   isPlanMode(): boolean;
+  shouldAutoPush(): boolean;
   setPlanMode(planMode: boolean): void;
 }
