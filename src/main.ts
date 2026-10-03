@@ -243,6 +243,14 @@ const commands = [
         .setRequired(true)
         .setAutocomplete(true)
     )
+    .addStringOption((option) =>
+      option.setName("language")
+        .setDescription(
+          "コミット・PRの言語（例: ja, en, 日本語）。省略時は会話の言語",
+        )
+        .setMinLength(1)
+        .setMaxLength(100)
+    )
     .toJSON(),
   new SlashCommandBuilder()
     .setName("stop")
@@ -593,7 +601,10 @@ async function handleStart(interaction: ChatInputCommandInteraction) {
     reason: `${repository.fullName}の作業スレッド`,
   });
 
-  const workerResult = await admin.createWorker(thread.id);
+  const workerResult = await admin.createWorker(
+    thread.id,
+    interaction.options.getString("language"),
+  );
   if (workerResult.isErr()) {
     await interaction.editReply("Workerの初期化に失敗しました。");
     return;

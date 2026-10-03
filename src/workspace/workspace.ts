@@ -47,6 +47,7 @@ export interface WorkerState {
   createdAt: string;
   lastActiveAt: string;
   isPlanMode?: boolean;
+  commitPrLanguage?: string | null;
 }
 
 interface WorkspaceConfig {
