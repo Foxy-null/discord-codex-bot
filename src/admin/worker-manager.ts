@@ -20,6 +20,7 @@ export class WorkerManager {
   async createWorker(
     threadId: string,
     autoPush = true,
+    commitPrLanguage?: string | null,
   ): Promise<Result<IWorker, WorkerManagerError>> {
     const existing = this.workers.get(threadId);
     if (existing) return ok(existing);
@@ -28,6 +29,7 @@ export class WorkerManager {
     const state: WorkerState = {
       workerName: generateWorkerName(),
       threadId,
+      commitPrLanguage: commitPrLanguage?.trim() || null,
       status: "active",
       createdAt: now,
       lastActiveAt: now,

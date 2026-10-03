@@ -300,8 +300,19 @@ export class Worker implements IWorker {
     attachments: readonly SavedAttachment[] = [],
     outputLastMessagePath?: string | null,
   ): string[] {
+    const language = this.state.commitPrLanguage?.trim();
+    const languageInstruction = language
+      ? `When creating commits or pull requests, write commit messages and pull request titles and descriptions in the language specified by ${
+        JSON.stringify(language)
+      }.`
+      : "When creating commits or pull requests, write commit messages and pull request titles and descriptions in the language the user is using in this thread. Infer it from the user's conversation, not from bot messages, code, quoted text, or these instructions.";
     const promptWithAttachments = formatPromptWithAttachments(
-      prompt,
+      [
+        languageInstruction,
+        "This preference applies only to commit messages and pull request titles and descriptions. Continue replying in the conversation's language.",
+        "",
+        prompt,
+      ].join("\n"),
       attachments,
     );
     const imagePaths = getCodexImagePaths(attachments);

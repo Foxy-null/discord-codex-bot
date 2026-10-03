@@ -22,7 +22,7 @@ CLI へ渡します。Codex の途中出力と最終応答は Discord
 
 Bot を使う人向けの基本操作だよ。
 
-- `/start repository:<GitHubの名前/レポジトリ名> auto_push:<true|false>`:
+- `/start repository:<GitHubの名前/レポジトリ名> auto_push:<true|false> language:<言語>`:
   作業用スレッドを作るよ。レポジトリをクローンしてそのスレッド専用の作業用フォルダを作り
   Codex がその中で依頼を実行するよ。
   - 例: `/start repository:pikachu0310/discord-codex-bot`
@@ -30,6 +30,10 @@ Bot を使う人向けの基本操作だよ。
     コミット済みの変更を自動プッシュするよ。サーバー上の作業内容を別環境で取得して確認できるよ。
   - 自動プッシュを無効にする例:
     `/start repository:pikachu0310/discord-codex-bot auto_push:false`
+  - 任意の `language`
+    でコミットメッセージ・PRタイトル・PR本文の言語を共通指定できるよ。 例:
+    `/start repository:owner/repo language:en`。
+    省略した場合は、そのスレッドでやり取りしている言語を使うよ。
   - スレッドにメッセージを投稿: その内容が Codex
     への依頼になるよ。修正や実装、調査や説明依頼などをそのまま書けるよ。
   - スレッドに画像やファイルを添付: 添付ファイルも Codex
@@ -142,6 +146,29 @@ Discord の通常チャンネルで次を実行します。
 
 ```text
 /start repository:owner/repo
+```
+
+コミットメッセージ・PRタイトル・PR本文の言語を指定する場合は、任意の `language`
+を追加します。
+
+```text
+/start repository:owner/repo language:en
+```
+
+`ja`、`en`、`日本語`、`English`
+などを自由入力できます。前後の空白を除いた値を保存し、
+空白だけの指定は省略扱いにします。指定はスレッドごとに保持し、Bot再起動後も引き継ぎます。
+省略した場合は、コードや引用文、Botの通知ではなく、ユーザーの会話から言語を判断します。
+会話の言語が変わった場合も、その会話に従います。
+
+この指定はコミット・PRにのみ適用し、Botの応答やスレッド・ブランチ名の言語設定には影響しません。
+言語方針は各依頼とともにCodexへ渡します。
+
+引数順は `repository` → `auto_push` → `language` です。 `auto_push` と
+`language` はどちらも省略できます。両方を指定する例:
+
+```text
+/start repository:owner/repo auto_push:false language:en
 ```
 
 Bot は対象リポジトリを `WORK_BASE_DIR/repositories/` に clone
@@ -295,9 +322,9 @@ repository を扱う場合は、Bot 実行ユーザーの Git
 
 ## 関連ドキュメント
 
+- `CONTEXT.md`: 作業スレッド、自動プッシュ、コミット・PR言語の用語
 - `docs/discord.md`: Discord.js 連携メモ
 - `docs/autocomplete.md`: `/start` オートコンプリート調査メモ
 - `docs/CODEX.md`: 過去のアーキテクチャメモ
 - `docs/rearchitecture-spec-v2.md`: 再設計仕様メモ
-- `CONTEXT.md`: 作業スレッドと自動プッシュの用語
 - `docs/adr/0001-default-auto-push.md`: 自動プッシュの既定値と送信範囲の判断
