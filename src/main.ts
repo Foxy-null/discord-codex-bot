@@ -41,9 +41,9 @@ import {
   sendOutputAttachments,
 } from "./output-attachments.ts";
 import {
+  commitAndPushWorktreeBranch,
   ensureRepository,
   parseRepository,
-  pushWorktreeBranch,
   renameInitialBranch,
 } from "./git-utils.ts";
 import {
@@ -251,7 +251,7 @@ const commands = [
     .addBooleanOption((option) =>
       option.setName("auto_push")
         .setDescription(
-          "応答完了後に作業ブランチを自動プッシュします（既定: true）",
+          "正常終了後に全変更を自動コミット・プッシュします（既定: true）",
         )
         .setRequired(false)
     )
@@ -638,7 +638,7 @@ async function handleStart(interaction: ChatInputCommandInteraction) {
     : `${repository.fullName}を新規取得しました。`;
 
   await interaction.editReply(
-    `${message}\nスレッド: ${thread.toString()}\n自動プッシュ: ${
+    `${message}\nスレッド: ${thread.toString()}\n自動コミット・プッシュ: ${
       autoPush ? "有効" : "無効"
     }`,
   );
@@ -901,15 +901,22 @@ client.on(Events.MessageCreate, (message) => {
     if (workerResult.value.shouldAutoPush()) {
       const workerState = await workspaceManager.loadWorkerState(threadId);
       if (workerState?.worktreePath) {
-        const pushed = await pushWorktreeBranch(workerState.worktreePath);
+        const pushed = await commitAndPushWorktreeBranch(
+          workerState.worktreePath,
+          () => workerResult.value.generateCommitMessage(message.content),
+        );
         if (pushed.isErr()) {
-          console.error("[AutoPush] push failed", pushed.error);
+          console.error("[AutoPush] commit or push failed", pushed.error);
+          const operation = pushed.error.type === "COMMAND_EXECUTION_FAILED" &&
+              pushed.error.command === "git push --set-upstream origin HEAD"
+            ? "自動プッシュ"
+            : "自動コミット";
           const detail = pushed.error.type === "COMMAND_EXECUTION_FAILED"
             ? pushed.error.error
             : pushed.error.type;
           for (
             const chunk of chunkDiscordContent(
-              `自動プッシュに失敗しました。作業内容はローカルに残っています。\n${
+              `${operation}に失敗しました。作業内容はローカルに残っています。\n${
                 formatErrorDetail(detail)
               }`,
             )
@@ -918,16 +925,21 @@ client.on(Events.MessageCreate, (message) => {
           }
         } else {
           const lines: string[] = [];
+          if (pushed.value.commitMessage) {
+            lines.push(`自動コミット完了: ${pushed.value.commitMessage}`);
+          }
           if (pushed.value.branch) {
             lines.push(`自動プッシュ完了: origin/${pushed.value.branch}`);
           }
           if (pushed.value.hasUncommittedChanges) {
             lines.push(
-              "未コミットの変更があります。この変更は別環境では取得できません。反映するにはコミットしてください。",
+              "未コミットの変更が残っています。この変更は別環境では取得できません。",
             );
           }
           if (lines.length > 0) {
-            await sendThreadMessage(thread, lines.join("\n"));
+            for (const chunk of chunkDiscordContent(lines.join("\n"))) {
+              await sendThreadMessage(thread, chunk);
+            }
           }
         }
       }

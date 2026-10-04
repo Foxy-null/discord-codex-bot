@@ -1,6 +1,6 @@
 import { assertEquals } from "std/assert/mod.ts";
 import { dirname, fromFileUrl } from "std/path/mod.ts";
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import type { CodexCommandExecutor } from "../src/worker/codex-executor.ts";
 import { Worker } from "../src/worker/worker.ts";
 import { OUTPUT_ATTACHMENT_INSTRUCTIONS } from "../src/output-attachments.ts";
@@ -127,6 +127,117 @@ Deno.test("Worker: 自動プッシュは有効設定の正常終了後のみ許�
       // A failed next request must clear the previous success.
       state.worktreePath = null;
       assertEquals((await worker.processMessage("次の依頼")).isErr(), true);
+      assertEquals(worker.shouldAutoPush(), false);
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("Worker: 自動コミットの言語指定と会話履歴を引き継いで読み取り専用で生成する", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const workspace = new WorkspaceManager(dir);
+    await workspace.initialize();
+    for (const language of [undefined, "  ", "  en  ", "日本語"]) {
+      const commitMessage = "✨ 入力チェックを追加する";
+      const executor = new FakeCodexExecutor([
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: commitMessage },
+        }),
+      ]);
+      const now = new Date().toISOString();
+      const worker = new Worker(
+        {
+          workerName: "test",
+          threadId: "thread-1",
+          repository: { fullName: "owner/repo", org: "owner", repo: "repo" },
+          worktreePath: dir,
+          sessionId: "session-1",
+          autoPush: true,
+          commitPrLanguage: language,
+          status: "active",
+          createdAt: now,
+          lastActiveAt: now,
+        },
+        workspace,
+        executor,
+      );
+      await worker.processMessage("入力チェックを追加して");
+      const result = await worker.generateCommitMessage(
+        "入力チェックを追加して",
+      );
+      assertEquals(result._unsafeUnwrap(), commitMessage);
+      assertEquals(worker.shouldAutoPush(), true);
+      const args = executor.executedArgs[1];
+      assertEquals(args[args.indexOf("--sandbox") + 1], "read-only");
+      assertEquals(
+        args.includes("--dangerously-bypass-approvals-and-sandbox"),
+        false,
+      );
+      assertEquals(args[args.indexOf("resume") + 1], "session-1");
+      const prompt = args.at(-1)!;
+      assertEquals(
+        prompt.includes(
+          language?.trim()
+            ? `language specified by ${JSON.stringify(language.trim())}`
+            : "language the user is using in this thread",
+        ),
+        true,
+      );
+      assertEquals(prompt.includes("git diff --cached"), true);
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("Worker: メッセージ生成の失敗・空応答をコミット用文字列として返さない", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const workspace = new WorkspaceManager(dir);
+    const now = new Date().toISOString();
+    const scenarios: CodexCommandExecutor[] = [
+      new FakeCodexExecutor([], undefined),
+      new FakeCodexExecutor(
+        [
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: "途中の候補" },
+          }),
+        ],
+        undefined,
+        1,
+        "generation failed",
+      ),
+      {
+        executeStreaming: () =>
+          Promise.resolve(err({
+            type: "STREAM_PROCESSING_ERROR",
+            error: "stream failed",
+          })),
+      },
+      {
+        executeStreaming: () => {
+          throw new Error("executor failed");
+        },
+      },
+    ];
+    for (const executor of scenarios) {
+      const worker = new Worker(
+        {
+          workerName: "test",
+          threadId: "thread-1",
+          worktreePath: dir,
+          status: "active",
+          createdAt: now,
+          lastActiveAt: now,
+        },
+        workspace,
+        executor,
+      );
+      assertEquals((await worker.generateCommitMessage("依頼")).isErr(), true);
       assertEquals(worker.shouldAutoPush(), false);
     }
   } finally {

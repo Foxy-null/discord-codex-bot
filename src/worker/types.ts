@@ -35,5 +35,8 @@ export interface IWorker {
   ): Promise<boolean>;
   isPlanMode(): boolean;
   shouldAutoPush(): boolean;
+  generateCommitMessage(
+    message: string,
+  ): Promise<import("neverthrow").Result<string, string>>;
   setPlanMode(planMode: boolean): void;
 }
