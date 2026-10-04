@@ -212,14 +212,16 @@ export async function renameInitialBranch(
   return ok(branchName);
 }
 
-export interface PushWorktreeResult {
+export interface CommitAndPushWorktreeResult {
   branch: string | null;
+  commitMessage: string | null;
   hasUncommittedChanges: boolean;
 }
 
-export async function pushWorktreeBranch(
+export async function commitAndPushWorktreeBranch(
   worktreePath: string,
-): Promise<Result<PushWorktreeResult, GitUtilsError>> {
+  generateCommitMessage: () => Promise<Result<string, string>>,
+): Promise<Result<CommitAndPushWorktreeResult, GitUtilsError>> {
   let command = "git symbolic-ref HEAD";
   try {
     const current = await runGit(worktreePath, [
@@ -248,13 +250,61 @@ export async function pushWorktreeBranch(
       branch === "main" || branch === "master" ||
       defaultRef.stdout === `refs/remotes/origin/${branch}`
     ) {
-      throw new Error(`既定ブランチへの自動プッシュは行いません: ${branch}`);
+      throw new Error(
+        `既定ブランチでは自動コミット・プッシュを行いません: ${branch}`,
+      );
     }
 
-    command = "git status --porcelain";
-    const status = await runGit(worktreePath, ["status", "--porcelain"]);
+    command = "git status --porcelain --untracked-files=all";
+    const status = await runGit(worktreePath, [
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+    ]);
     if (status.code !== 0) throw new Error(status.stderr);
-    const hasUncommittedChanges = status.stdout.length > 0;
+    let hasUncommittedChanges = status.stdout.length > 0;
+    let commitMessage: string | null = null;
+    if (hasUncommittedChanges) {
+      command = "git diff --name-only --diff-filter=U";
+      const unmerged = await runGit(worktreePath, [
+        "diff",
+        "--name-only",
+        "--diff-filter=U",
+      ]);
+      if (unmerged.code !== 0) throw new Error(unmerged.stderr);
+      if (unmerged.stdout) throw new Error("未解決の競合があります。");
+
+      command = "git add --all";
+      const staged = await runGit(worktreePath, ["add", "--all"]);
+      if (staged.code !== 0) throw new Error(staged.stderr);
+
+      command = "git diff --cached --quiet";
+      const diff = await runGit(worktreePath, ["diff", "--cached", "--quiet"]);
+      if (diff.code !== 0 && diff.code !== 1) throw new Error(diff.stderr);
+      if (diff.code === 1) {
+        command = "generate commit message";
+        const generated = await generateCommitMessage();
+        if (generated.isErr()) throw new Error(generated.error);
+        const message = generated.value.trim();
+        if (!message) throw new Error("コミットメッセージが空です。");
+
+        command = "git commit";
+        const committed = await runGit(worktreePath, ["commit", "-m", message]);
+        if (committed.code !== 0) {
+          throw new Error(committed.stderr || committed.stdout);
+        }
+        commitMessage = message;
+      }
+
+      command = "git status --porcelain --untracked-files=all";
+      const remaining = await runGit(worktreePath, [
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+      ]);
+      if (remaining.code !== 0) throw new Error(remaining.stderr);
+      hasUncommittedChanges = remaining.stdout.length > 0;
+    }
 
     command = "git rev-list --count origin/HEAD..HEAD";
     const ahead = await runGit(worktreePath, [
@@ -265,7 +315,7 @@ export async function pushWorktreeBranch(
     ]);
     if (ahead.code !== 0) throw new Error(ahead.stderr);
     if (ahead.stdout === "0") {
-      return ok({ branch: null, hasUncommittedChanges });
+      return ok({ branch: null, commitMessage, hasUncommittedChanges });
     }
 
     command = "git push --set-upstream origin HEAD";
@@ -276,7 +326,7 @@ export async function pushWorktreeBranch(
       `HEAD:refs/heads/${branch}`,
     ]);
     if (pushed.code !== 0) throw new Error(pushed.stderr);
-    return ok({ branch, hasUncommittedChanges });
+    return ok({ branch, commitMessage, hasUncommittedChanges });
   } catch (error) {
     return err({
       type: "COMMAND_EXECUTION_FAILED",

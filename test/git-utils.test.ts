@@ -1,8 +1,9 @@
 import { assertEquals, assertStringIncludes } from "std/assert/mod.ts";
+import { err, ok } from "neverthrow";
 import {
+  commitAndPushWorktreeBranch,
   generateBranchName,
   parseRepository,
-  pushWorktreeBranch,
   renameInitialBranch,
 } from "../src/git-utils.ts";
 
@@ -15,7 +16,7 @@ Deno.test("parseRepository: owner/repo を解析できる", () => {
   assertEquals(parsed.value.repo, "hello-world");
 });
 
-Deno.test("pushWorktreeBranch: 改名後のコミットだけをoriginへ送り、強制上書きしない", async () => {
+Deno.test("commitAndPushWorktreeBranch: 全変更をコミットしてoriginへ送り、失敗時も保持する", async () => {
   const dir = await Deno.makeTempDir();
   const remote = `${dir}/origin.git`;
   const seed = `${dir}/seed`;
@@ -24,6 +25,13 @@ Deno.test("pushWorktreeBranch: 改名後のコミットだけをoriginへ送り�
     const output = await new Deno.Command("git", { cwd, args }).output();
     assertEquals(output.code, 0, new TextDecoder().decode(output.stderr));
     return new TextDecoder().decode(output.stdout).trim();
+  };
+  let generationCount = 0;
+  const commitMessage =
+    "✨ 既存の変更と新しい変更をまとめる\n\n`引用`と$(文字列)を保持する";
+  const generate = () => {
+    generationCount++;
+    return Promise.resolve(ok(commitMessage));
   };
   try {
     await run(dir, ["init", "--bare", "-b", "main", remote]);
@@ -45,15 +53,23 @@ Deno.test("pushWorktreeBranch: 改名後のコミットだけをoriginへ送り�
     const workerBranch = "worker/2026-10-03/worker-120000-test-bot";
     await run(worktree, ["checkout", "-b", workerBranch]);
 
-    const unchanged = (await pushWorktreeBranch(worktree))._unsafeUnwrap();
-    assertEquals(unchanged, { branch: null, hasUncommittedChanges: false });
+    const unchanged = (await commitAndPushWorktreeBranch(worktree, generate))
+      ._unsafeUnwrap();
+    assertEquals(unchanged, {
+      branch: null,
+      commitMessage: null,
+      hasUncommittedChanges: false,
+    });
+    assertEquals(generationCount, 0);
     assertEquals(
       await run(remote, ["for-each-ref", "--format=%(refname)", "refs/heads/"]),
       "refs/heads/main",
     );
 
     await Deno.writeTextFile(`${worktree}/committed.txt`, "committed");
-    await run(worktree, ["add", "committed.txt"]);
+    await Deno.writeTextFile(`${worktree}/deleted.txt`, "delete later");
+    await Deno.writeTextFile(`${worktree}/.gitignore`, "*.ignored\n");
+    await run(worktree, ["add", "--all"]);
     await run(worktree, ["commit", "-m", "feature"]);
     const featureHead = await run(worktree, ["rev-parse", "HEAD"]);
     const branch = "feat/auto-push";
@@ -68,13 +84,31 @@ Deno.test("pushWorktreeBranch: 改名後のコミットだけをoriginへ送り�
     await Deno.writeTextFile(`${worktree}/uncommitted.txt`, "untracked");
     await Deno.writeTextFile(`${worktree}/staged.txt`, "staged");
     await run(worktree, ["add", "staged.txt"]);
-    const statusBefore = await run(worktree, ["status", "--porcelain"]);
+    await Deno.remove(`${worktree}/deleted.txt`);
+    await Deno.writeTextFile(`${worktree}/private.ignored`, "ignored");
 
-    const result = (await pushWorktreeBranch(worktree))._unsafeUnwrap();
-    assertEquals(result, { branch, hasUncommittedChanges: true });
+    const result = (await commitAndPushWorktreeBranch(worktree, async () => {
+      assertStringIncludes(
+        await run(worktree, ["diff", "--cached", "--name-only"]),
+        "uncommitted.txt",
+      );
+      return await generate();
+    }))._unsafeUnwrap();
+    assertEquals(result, {
+      branch,
+      commitMessage,
+      hasUncommittedChanges: false,
+    });
+    assertEquals(generationCount, 1);
+    const committedHead = await run(worktree, ["rev-parse", "HEAD"]);
+    assertEquals(await run(worktree, ["rev-parse", "HEAD^"]), featureHead);
+    assertEquals(
+      await run(worktree, ["log", "-1", "--format=%B"]),
+      commitMessage,
+    );
     assertEquals(
       await run(remote, ["rev-parse", `refs/heads/${branch}`]),
-      featureHead,
+      committedHead,
     );
     assertEquals(
       await run(remote, ["rev-parse", "refs/heads/main"]),
@@ -82,9 +116,24 @@ Deno.test("pushWorktreeBranch: 改名後のコミットだけをoriginへ送り�
     );
     assertEquals(
       await run(remote, ["show", `${branch}:committed.txt`]),
-      "committed",
+      "modified",
     );
-    assertEquals(await run(worktree, ["status", "--porcelain"]), statusBefore);
+    assertEquals(await run(remote, ["show", `${branch}:staged.txt`]), "staged");
+    assertEquals(
+      await run(remote, ["show", `${branch}:uncommitted.txt`]),
+      "untracked",
+    );
+    assertEquals(
+      await run(remote, [
+        "ls-tree",
+        "--name-only",
+        branch,
+        "deleted.txt",
+        "private.ignored",
+      ]),
+      "",
+    );
+    assertEquals(await run(worktree, ["status", "--porcelain"]), "");
     assertEquals(
       await run(worktree, ["rev-parse", "--abbrev-ref", "@{upstream}"]),
       `origin/${branch}`,
@@ -98,43 +147,161 @@ Deno.test("pushWorktreeBranch: 改名後のコミットだけをoriginへ送り�
       "",
     );
 
+    // Already committed work is pushed without another commit or generation.
+    await run(worktree, ["commit", "--allow-empty", "-m", "manual commit"]);
+    const manualHead = await run(worktree, ["rev-parse", "HEAD"]);
+    const pushedOnly = (await commitAndPushWorktreeBranch(worktree, generate))
+      ._unsafeUnwrap();
+    assertEquals(pushedOnly.commitMessage, null);
+    assertEquals(generationCount, 1);
+    assertEquals(
+      await run(remote, ["rev-parse", `refs/heads/${branch}`]),
+      manualHead,
+    );
+    await commitAndPushWorktreeBranch(worktree, generate);
+    assertEquals(await run(worktree, ["rev-parse", "HEAD"]), manualHead);
+    assertEquals(generationCount, 1);
+
+    // Generation and commit-hook failures never push or discard the changes.
+    await run(worktree, ["config", "status.showUntrackedFiles", "no"]);
+    await Deno.writeTextFile(`${worktree}/pending.txt`, "pending");
+    for (const message of [err("generation failed"), ok("   ")]) {
+      assertEquals(
+        (await commitAndPushWorktreeBranch(
+          worktree,
+          () => Promise.resolve(message),
+        )).isErr(),
+        true,
+      );
+      assertEquals(await run(worktree, ["rev-parse", "HEAD"]), manualHead);
+      assertEquals(
+        await run(remote, ["rev-parse", `refs/heads/${branch}`]),
+        manualHead,
+      );
+      assertEquals(
+        await Deno.readTextFile(`${worktree}/pending.txt`),
+        "pending",
+      );
+    }
+    await run(worktree, ["config", "--unset", "status.showUntrackedFiles"]);
+    const hooks = `${dir}/hooks`;
+    await Deno.mkdir(hooks);
+    await Deno.writeTextFile(`${hooks}/pre-commit`, "#!/bin/sh\nexit 1\n");
+    await Deno.chmod(`${hooks}/pre-commit`, 0o755);
+    await run(worktree, ["config", "core.hooksPath", hooks]);
+    const failedCommit = (await commitAndPushWorktreeBranch(worktree, generate))
+      ._unsafeUnwrapErr();
+    assertEquals(failedCommit.type, "COMMAND_EXECUTION_FAILED");
+    if (failedCommit.type === "COMMAND_EXECUTION_FAILED") {
+      assertEquals(failedCommit.command, "git commit");
+    }
+    assertEquals(await run(worktree, ["rev-parse", "HEAD"]), manualHead);
+    assertEquals(
+      await run(remote, ["rev-parse", `refs/heads/${branch}`]),
+      manualHead,
+    );
+    assertStringIncludes(
+      await run(worktree, ["status", "--porcelain"]),
+      "pending.txt",
+    );
+    await run(worktree, ["config", "--unset", "core.hooksPath"]);
+
     // Advance the remote on a sibling commit to exercise non-fast-forward rejection.
     await run(seed, ["fetch", "origin", `${branch}`]);
     await run(seed, ["checkout", "-b", branch, "FETCH_HEAD"]);
     await run(seed, ["commit", "--allow-empty", "-m", "remote change"]);
     await run(seed, ["push", "origin", branch]);
     const remoteHead = await run(seed, ["rev-parse", "HEAD"]);
-    await run(worktree, [
-      "commit",
-      "--allow-empty",
-      "--only",
-      "-m",
-      "local change",
-    ]);
+    const rejectedPush = (await commitAndPushWorktreeBranch(worktree, generate))
+      ._unsafeUnwrapErr();
+    if (rejectedPush.type === "COMMAND_EXECUTION_FAILED") {
+      assertEquals(rejectedPush.command, "git push --set-upstream origin HEAD");
+    }
     const localHead = await run(worktree, ["rev-parse", "HEAD"]);
-    assertEquals((await pushWorktreeBranch(worktree)).isErr(), true);
+    assertEquals(localHead === manualHead, false);
     assertEquals(
       await run(remote, ["rev-parse", `refs/heads/${branch}`]),
       remoteHead,
     );
     assertEquals(await run(worktree, ["rev-parse", "HEAD"]), localHead);
-    assertEquals(await run(worktree, ["status", "--porcelain"]), statusBefore);
+    assertEquals(await run(worktree, ["status", "--porcelain"]), "");
+    assertEquals(await run(worktree, ["show", "HEAD:pending.txt"]), "pending");
 
-    await run(worktree, ["symbolic-ref", "HEAD", "refs/heads/main"]);
-    const protectedBranch = (await pushWorktreeBranch(worktree))
-      ._unsafeUnwrapErr();
-    assertEquals(protectedBranch.type, "COMMAND_EXECUTION_FAILED");
-    if (protectedBranch.type === "COMMAND_EXECUTION_FAILED") {
-      assertStringIncludes(protectedBranch.error, "既定ブランチ");
+    // An unresolved merge is rejected before git add can mark it resolved.
+    await run(worktree, ["checkout", "-b", "conflict-source"]);
+    await Deno.writeTextFile(`${worktree}/committed.txt`, "source");
+    await run(worktree, ["add", "--all"]);
+    await run(worktree, ["commit", "-m", "source"]);
+    await run(worktree, ["checkout", branch]);
+    await Deno.writeTextFile(`${worktree}/committed.txt`, "target");
+    await run(worktree, ["add", "--all"]);
+    await run(worktree, ["commit", "-m", "target"]);
+    const merge = await new Deno.Command("git", {
+      cwd: worktree,
+      args: ["merge", "conflict-source"],
+    }).output();
+    assertEquals(merge.code, 1);
+    const unmergedStatus = await run(worktree, ["status", "--porcelain"]);
+    const countBeforeConflict = generationCount;
+    assertEquals(
+      (await commitAndPushWorktreeBranch(worktree, generate)).isErr(),
+      true,
+    );
+    assertEquals(
+      await run(worktree, ["status", "--porcelain"]),
+      unmergedStatus,
+    );
+    assertEquals(generationCount, countBeforeConflict);
+    await run(worktree, ["merge", "--abort"]);
+
+    await run(worktree, ["checkout", "main"]);
+    await Deno.writeTextFile(`${worktree}/protected.txt`, "do not stage");
+    const protectedStatus = await run(worktree, ["status", "--porcelain"]);
+    for (const protectedName of ["main", "master", "trunk"]) {
+      if (protectedName !== "main") {
+        await run(worktree, ["checkout", "-b", protectedName]);
+      }
+      if (protectedName === "trunk") {
+        await run(worktree, [
+          "update-ref",
+          "refs/remotes/origin/trunk",
+          initialHead,
+        ]);
+        await run(worktree, [
+          "symbolic-ref",
+          "refs/remotes/origin/HEAD",
+          "refs/remotes/origin/trunk",
+        ]);
+      }
+      const protectedBranch =
+        (await commitAndPushWorktreeBranch(worktree, generate))
+          ._unsafeUnwrapErr();
+      assertEquals(protectedBranch.type, "COMMAND_EXECUTION_FAILED");
+      if (protectedBranch.type === "COMMAND_EXECUTION_FAILED") {
+        assertStringIncludes(protectedBranch.error, "既定ブランチ");
+      }
+      assertEquals(await run(worktree, ["rev-parse", "HEAD"]), initialHead);
+      assertEquals(
+        await run(worktree, ["status", "--porcelain"]),
+        protectedStatus,
+      );
+      assertEquals(generationCount, countBeforeConflict);
     }
     assertEquals(
       await run(remote, ["rev-parse", "refs/heads/main"]),
       initialHead,
     );
 
-    await run(worktree, ["symbolic-ref", "HEAD", `refs/heads/${branch}`]);
-    await run(worktree, ["update-ref", "--no-deref", "HEAD", localHead]);
-    assertEquals((await pushWorktreeBranch(worktree)).isErr(), true);
+    await run(worktree, ["checkout", "--detach", initialHead]);
+    assertEquals(
+      (await commitAndPushWorktreeBranch(worktree, generate)).isErr(),
+      true,
+    );
+    assertEquals(
+      await run(worktree, ["status", "--porcelain"]),
+      protectedStatus,
+    );
+    assertEquals(generationCount, countBeforeConflict);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

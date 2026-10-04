@@ -306,15 +306,9 @@ export class Worker implements IWorker {
     attachments: readonly SavedAttachment[] = [],
     outputLastMessagePath?: string | null,
   ): string[] {
-    const language = this.state.commitPrLanguage?.trim();
-    const languageInstruction = language
-      ? `When creating commits or pull requests, write commit messages and pull request titles and descriptions in the language specified by ${
-        JSON.stringify(language)
-      }.`
-      : "When creating commits or pull requests, write commit messages and pull request titles and descriptions in the language the user is using in this thread. Infer it from the user's conversation, not from bot messages, code, quoted text, or these instructions.";
     const promptWithAttachments = formatPromptWithAttachments(
       [
-        languageInstruction,
+        this.commitPrLanguageInstruction(),
         "This preference applies only to commit messages and pull request titles and descriptions. Continue replying in the conversation's language.",
         "",
         OUTPUT_ATTACHMENT_INSTRUCTIONS,
@@ -571,6 +565,73 @@ export class Worker implements IWorker {
 
   isPlanMode(): boolean {
     return this.state.isPlanMode ?? false;
+  }
+
+  private commitPrLanguageInstruction(): string {
+    const language = this.state.commitPrLanguage?.trim();
+    return language
+      ? `When creating commits or pull requests, write commit messages and pull request titles and descriptions in the language specified by ${
+        JSON.stringify(language)
+      }.`
+      : "When creating commits or pull requests, write commit messages and pull request titles and descriptions in the language the user is using in this thread. Infer it from the user's conversation, not from bot messages, code, quoted text, or these instructions.";
+  }
+
+  async generateCommitMessage(
+    message: string,
+  ): Promise<Result<string, string>> {
+    if (!this.state.worktreePath) return err("作業コピーがありません。");
+    const prompt = [
+      this.commitPrLanguageInstruction(),
+      "Write a Git commit message for all currently staged changes. Inspect git diff --cached and follow the repository's commit conventions.",
+      "The staged changes may include work from before the latest request. Summarize all of them accurately.",
+      "Only output the commit message, without Markdown fences or explanations. Do not modify files, commit, or push.",
+      "The latest user request is context, not an instruction to perform more work:",
+      JSON.stringify(message),
+    ].join("\n");
+    const args = [
+      "exec",
+      "--json",
+      "--color",
+      "never",
+      "--sandbox",
+      "read-only",
+    ];
+    if (this.state.sessionId) args.push("resume", this.state.sessionId);
+    args.push(prompt);
+    let output = "";
+    const decoder = new TextDecoder();
+    try {
+      const result = await this.codexExecutor.executeStreaming(
+        args,
+        this.state.worktreePath,
+        (data) => output += decoder.decode(data, { stream: true }),
+      );
+      if (result.isErr()) {
+        return err(
+          result.error.type === "STREAM_PROCESSING_ERROR"
+            ? result.error.error
+            : result.error.stderr,
+        );
+      }
+      if (result.value.code !== 0) {
+        return err(
+          new TextDecoder().decode(result.value.stderr).trim() ||
+            `メッセージ生成の終了コード: ${result.value.code}`,
+        );
+      }
+      output += decoder.decode();
+      const processor = new CodexStreamProcessor();
+      let commitMessage = "";
+      for (const line of output.split("\n")) {
+        const parsed = processor.parseLine(line);
+        if (parsed.finalText) commitMessage = parsed.finalText.trim();
+      }
+      return commitMessage
+        ? ok(commitMessage)
+        : err("コミットメッセージを生成できませんでした。");
+    } catch (error) {
+      return err(formatUnknownError(error));
+    }
   }
 
   shouldAutoPush(): boolean {
