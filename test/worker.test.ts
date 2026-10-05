@@ -120,6 +120,57 @@ Deno.test("Worker: 初回準備中の入力を受信順にSteerし、会話IDを
   }
 });
 
+Deno.test("Worker: Steer前後の最終回答と添付を生成順に残し、完了時に一度だけ返信する", async () => {
+  const env = await setup();
+  env.client.autoComplete = false;
+  const replies: string[] = [];
+  const progress: string[] = [];
+  const original = "元の回答\n[[attachment:report.pdf]]";
+  const acknowledgement = "以後、ログ全文は出しません。";
+  const emit = (id: string, text: string) =>
+    env.client.onNotification("item/completed", {
+      threadId: "thread-1",
+      item: {
+        id,
+        type: "agentMessage",
+        phase: "final_answer",
+        delivery: null,
+        text,
+      },
+    });
+  try {
+    const first = env.worker.processMessage(
+      "元の依頼",
+      [],
+      async (text) => {
+        progress.push(text);
+      },
+      undefined,
+      async (text) => {
+        replies.push(text);
+      },
+    );
+    await env.client.waitFor("turn/start");
+    emit("original", original);
+    assertEquals(
+      (await env.worker.processMessage("ログ全文の出力をやめて"))
+        ._unsafeUnwrap(),
+      null,
+    );
+    emit("acknowledgement", acknowledgement);
+    emit("original", original);
+    assertEquals(replies, []);
+    env.client.finish("thread-1");
+    assertEquals((await first)._unsafeUnwrap(), null);
+    assertEquals(replies, [`${original}\n\n${acknowledgement}`]);
+    assert(progress.some((text) => text.trim() === "元の回答"));
+    assert(progress.includes(acknowledgement));
+    assertEquals(env.worker.shouldAutoPush(), true);
+  } finally {
+    await env.cleanup();
+  }
+});
+
 Deno.test("Worker: 自動処理の成功判定をSteerで上書きせず、失敗・中断・プランでは許可しない", async () => {
   for (
     const scenario of [
@@ -236,6 +287,15 @@ Deno.test("Worker: コミット生成を一時的なread-only会話へ隔離し�
     const input = commitTurn.params.input as { text: string }[];
     assertStringIncludes(input[0].text, "git diff --cached");
     assertStringIncludes(input[0].text, 'language specified by "日本語"');
+    env.client.onNotification("item/completed", {
+      threadId: "internal-2",
+      item: {
+        id: "earlier-commit",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "先行するコミットメッセージ",
+      },
+    });
     env.client.complete("internal-2", "📝 変更を記録");
     await env.client.waitFor("thread/unsubscribe");
     assertEquals(
@@ -506,6 +566,7 @@ Deno.test("Worker: 生出力と思考要約を隠し、添付・途中出力・�
     env.client.onNotification("item/completed", {
       threadId: "thread-1",
       item: {
+        id: "answer",
         type: "agentMessage",
         phase: "final_answer",
         text: "回答\n[[attachment:report.pdf]]",

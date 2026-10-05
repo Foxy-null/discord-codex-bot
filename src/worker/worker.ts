@@ -30,7 +30,7 @@ interface RunningTurn {
   threadId: string;
   id: string | null;
   done: PromiseWithResolvers<Record<string, unknown>>;
-  finalText: string;
+  finalMessages: Map<string, string>;
   raw: string;
   onProgress: (content: string) => Promise<void>;
   progress: Promise<void>;
@@ -259,7 +259,7 @@ export class Worker implements IWorker {
       threadId,
       id: null,
       done: Promise.withResolvers<Record<string, unknown>>(),
-      finalText: "",
+      finalMessages: new Map(),
       raw: "",
       onProgress,
       progress: Promise.resolve(),
@@ -325,7 +325,10 @@ export class Worker implements IWorker {
       if (item.type === "agentMessage" && typeof item.text === "string") {
         progress = item.text;
         if (item.phase !== "commentary" && item.delivery !== "async") {
-          running.finalText = item.text;
+          if (typeof item.id !== "string" || !item.id) {
+            throw new Error("Codex応答IDを取得できませんでした。");
+          }
+          running.finalMessages.set(item.id, item.text);
         }
       } else if (item.type === "fileChange") {
         progress = "ファイルの変更を反映しました。";
@@ -365,7 +368,8 @@ export class Worker implements IWorker {
       const reply = turn.status === "interrupted"
         ? "⛔ Codex実行を中断しました。"
         : this.formatter.formatResponse(
-          running.finalText.trim() || MESSAGES.NO_FINAL_RESPONSE,
+          [...running.finalMessages.values()].join("\n\n").trim() ||
+            MESSAGES.NO_FINAL_RESPONSE,
         );
       await onComplete?.(reply);
       return ok(onComplete ? null : reply);
@@ -655,7 +659,9 @@ export class Worker implements IWorker {
           ),
         );
       }
-      const text = this.internalTurn.finalText.trim();
+      const text =
+        [...this.internalTurn.finalMessages.values()].at(-1)?.trim() ??
+          "";
       return text
         ? ok(text)
         : err("コミットメッセージを生成できませんでした。");
