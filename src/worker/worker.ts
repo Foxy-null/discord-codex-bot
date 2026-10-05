@@ -330,12 +330,6 @@ export class Worker implements IWorker {
           }
           running.finalMessages.set(item.id, item.text);
         }
-      } else if (item.type === "commandExecution") {
-        progress = String(item.aggregatedOutput ?? item.command ?? "");
-      } else if (item.type === "reasoning" && Array.isArray(item.summary)) {
-        progress = item.summary.filter((text) => typeof text === "string").join(
-          "\n",
-        );
       } else if (item.type === "fileChange") {
         progress = "ファイルの変更を反映しました。";
       }
