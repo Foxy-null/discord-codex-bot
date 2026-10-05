@@ -447,10 +447,26 @@ Deno.test("Worker: 初回失敗・中断でも会話IDを保存し、復元失�
   }
 });
 
-Deno.test("Worker: 添付・途中出力・進捗エラーを処理し、commentaryで最終回答を上書きしない", async () => {
+Deno.test("Worker: 生出力と思考要約を隠し、添付・途中出力・進捗エラーを処理する", async () => {
   const env = await setup();
   env.client.autoComplete = false;
   const progress: string[] = [];
+  const hiddenItems = [
+    {
+      type: "commandExecution",
+      command: "cat README.md CONTEXT.md",
+      aggregatedOutput: "読み取ったファイルの全文",
+      exitCode: 0,
+    },
+    {
+      type: "commandExecution",
+      command: "deno test",
+      aggregatedOutput: "テスト失敗の詳細",
+      exitCode: 1,
+    },
+    { type: "commandExecution", command: "rg TODO" },
+    { type: "reasoning", summary: ["内部の思考要約"] },
+  ];
   try {
     const request = env.worker.processMessage("画像を見て", [{
       id: "1",
@@ -477,9 +493,15 @@ Deno.test("Worker: 添付・途中出力・進捗エラーを処理し、comment
       threadId: "thread-1",
       item: { type: "contextCompaction" },
     });
+    for (const item of hiddenItems) {
+      env.client.onNotification("item/completed", {
+        threadId: "thread-1",
+        item,
+      });
+    }
     env.client.onNotification("item/completed", {
       threadId: "thread-1",
-      item: { type: "reasoning", summary: ["方針を確認中"] },
+      item: { type: "fileChange" },
     });
     env.client.onNotification("item/completed", {
       threadId: "thread-1",
@@ -498,12 +520,21 @@ Deno.test("Worker: 添付・途中出力・進捗エラーを処理し、comment
       (await request)._unsafeUnwrap(),
       "回答\n[[attachment:report.pdf]]",
     );
-    assert(progress.includes("コンテキスト圧縮が完了しました。"));
-    assert(progress.includes("方針を確認中"));
-    assertEquals(
-      progress.some((text) => text.includes("[[attachment:")),
-      false,
-    );
+    assertEquals(progress, [
+      "🤖 Codexが処理を開始しました...",
+      "コンテキスト圧縮を開始しました。",
+      "コンテキスト圧縮が完了しました。",
+      "ファイルの変更を反映しました。",
+      "回答\n",
+      "途中出力",
+    ]);
+    const logDir = `${env.dir}/sessions/owner/repo`;
+    const logs = await Array.fromAsync(Deno.readDir(logDir));
+    assertEquals(logs.length, 1);
+    const raw = await Deno.readTextFile(`${logDir}/${logs[0].name}`);
+    for (const item of hiddenItems) {
+      assertStringIncludes(raw, JSON.stringify(item));
+    }
     const original = console.error;
     console.error = () => {};
     try {
