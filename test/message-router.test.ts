@@ -16,6 +16,7 @@ function createRouter(error: WorkerError): MessageRouter {
       throw new Error("not implemented");
     },
     stopExecution: () => Promise.resolve(false),
+    close: () => Promise.resolve(),
     isPlanMode: () => false,
     shouldAutoPush: () => false,
     generateCommitMessage: () => Promise.resolve(err("not implemented")),
@@ -41,6 +42,7 @@ function createRejectingRouter(error: unknown): MessageRouter {
       throw new Error("not implemented");
     },
     stopExecution: () => Promise.resolve(false),
+    close: () => Promise.resolve(),
     isPlanMode: () => false,
     shouldAutoPush: () => false,
     generateCommitMessage: () => Promise.resolve(err("not implemented")),

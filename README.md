@@ -13,6 +13,7 @@ CLI へ渡します。Codex の途中出力と最終応答は Discord
 - `owner/repo` 形式の GitHub リポジトリを clone / update
 - スレッドごとに独立した作業ディレクトリと Codex セッションを管理
 - 通常メッセージと画像添付を Codex CLI に転送
+- 実行中の追加入力を現在の作業へ渡す
 - Codex の JSON ストリームを Discord 向けに整形して返信
 - Codex が成果物として指定した画像・PDF・ZIPなどのファイルを Discord に添付
 - 実行中 Codex の中断、プランモード、スレッドのクローズ
@@ -194,7 +195,7 @@ Gitで無視されているファイルは対象外です。メッセージは�
 `auto_push:false`
 は両方の自動処理を無効にしますが、明示的に依頼したコミット・プッシュは実行できます。
 
-正常終了はCodexの終了コードが `0` で、中断されていないことを指します。
+正常終了はCodexの作業ターンが `completed` で、中断されていないことを指します。
 説明・相談の返答やテスト失敗の報告でも、この条件を満たせば自動処理の対象です。
 Codexの失敗・中断・プランモードでは両方の自動処理を実行しません。
 `main`・`master`・リポジトリの既定ブランチでは、自動コミット・プッシュを行いません。
@@ -209,6 +210,9 @@ Codexの失敗・中断・プランモードでは両方の自動処理を実行
 
 作成されたスレッドに通常の Discord メッセージを投稿します。Bot はその内容を
 Codex CLI に渡し、進捗と応答を同じスレッドへ返します。
+実行中に投稿したメッセージは、現在の作業への追加指示として渡します。
+「追加指示を受け付けました」と通知し、最終返信と自動コミット・プッシュは作業の完了時に一度だけ行います。
+最終返信や自動コミット・プッシュの処理中に届いた入力は、後処理を終えてから次の作業として開始します。
 初回応答の送信後、会話内容を要約して Discord スレッド名と作業ブランチ名を
 自動更新します。
 
@@ -265,23 +269,18 @@ WORK_BASE_DIR/
 
 ## Codex CLI の実行形式
 
-Bot は概ね次の形式で Codex CLI を実行します。
-
-新規セッション:
+各Workerは必要になった時点で次のプロセスを起動し、接続を維持します。
 
 ```text
-codex --search exec --json --color never --dangerously-bypass-approvals-and-sandbox --output-last-message <path> "<prompt>"
+codex app-server --listen stdio://
 ```
 
-継続セッション:
-
-```text
-codex --search exec --json --color never --dangerously-bypass-approvals-and-sandbox resume --output-last-message <path> <session_id> "<prompt>"
-```
-
-画像添付がある場合は `--image <path>`
-が追加されます。`CODEX_APPEND_SYSTEM_PROMPT` を設定している場合は
-`--append-system-prompt` も追加されます。
+`thread/start`または`thread/resume`で会話を読み込み、通常の開始は`turn/start`、
+実行中の追加指示は`turn/steer`、`/stop`は`turn/interrupt`を使います。
+画像添付は`localImage`入力、`CODEX_APPEND_SYSTEM_PROMPT`は`developerInstructions`として渡します。
+実行時は承認不要・sandbox制限なし・Web検索有効とし、未対応の対話要求には明示的にエラーを返します。
+自動コミットのメッセージ生成には、独立した一時的なread-only会話を使います。
+`/close`とBot停止時には子プロセスも終了します。`codex-cli 0.160.0`で接続と復旧を検証しています。
 
 Bot は `--model` や `model_reasoning_effort` を指定しません。モデル、reasoning
 effort、profile などの Codex CLI 設定は、Bot を起動するユーザーの Codex CLI
@@ -290,6 +289,19 @@ effort、profile などの Codex CLI 設定は、Bot を起動するユーザー
 
 この Bot は Codex を自動実行するため、Bot
 専用の実行ユーザーと作業ディレクトリを用意することを推奨します。
+
+### 既存Workerの移行
+
+Workerの保存形式は変更していません。作業コピー、`sessionId`、言語、プランモード、自動プッシュ設定を引き継ぎます。
+再起動後の最初の入力で保存済みのCodex会話IDを再開します。復元できない場合はエラーを通知し、会話IDを保持します。
+
+1. 旧Botへの新規投稿を止め、実行中の作業と自動コミット・プッシュがすべて完了するまで待ちます。
+2. 旧Botを停止し、そのBotが起動したCodex子プロセスが終了したことを確認します。
+3. `WORK_BASE_DIR`、`CODEX_HOME`、実行ユーザー、Codexの認証・設定を維持して更新版を起動します。
+4. 既存スレッドに投稿して会話を継続できることを確認し、実行中に追加入力を送って受理通知を確認します。
+
+旧Botと新Botを同時起動しないでください。保存したWorker情報だけでは履歴を復元できないため、Codexの会話保存先も維持する必要があります。
+復旧時にwriter競合が出る場合は、旧プロセスが残っていないか確認します。
 
 ## 開発
 

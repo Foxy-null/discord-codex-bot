@@ -1,9 +1,12 @@
 import {
   assertEquals,
   assertExists,
+  assertRejects,
   assertStringIncludes,
 } from "std/assert/mod.ts";
+import { installCodexTestServer } from "./fixtures/codex-test-server.ts";
 import { Admin } from "../src/admin/admin.ts";
+import { WorkerManager } from "../src/admin/worker-manager.ts";
 import { WorkspaceManager } from "../src/workspace/workspace.ts";
 
 Deno.test("Admin: active thread ids は内部状態のコピーを返す", () => {
@@ -21,21 +24,49 @@ Deno.test("Admin: active thread ids は内部状態のコピーを返す", () =>
   assertEquals(admin.getActiveThreadIds(), ["thread-1", "thread-2"]);
 });
 
+Deno.test("WorkerManager: 終了失敗があっても全Workerの回収が終わるまで待つ", async () => {
+  const dir = await Deno.makeTempDir();
+  const finish = Promise.withResolvers<void>();
+  try {
+    const workspace = new WorkspaceManager(dir);
+    await workspace.initialize();
+    const manager = new WorkerManager(workspace);
+    const first = (await manager.createWorker("one"))._unsafeUnwrap();
+    const second = (await manager.createWorker("two"))._unsafeUnwrap();
+    const started = Promise.withResolvers<void>();
+    first.close = async () => {
+      throw new Error("first failed");
+    };
+    second.close = async () => {
+      started.resolve();
+      await finish.promise;
+    };
+    let finished = false;
+    const closing = manager.closeAll();
+    const settled = closing.then(() => {
+      finished = true;
+    }, () => {
+      finished = true;
+    });
+    await started.promise;
+    assertEquals(finished, false);
+    finish.resolve();
+    await assertRejects(() => closing, AggregateError, "Workerの終了処理");
+    await settled;
+    assertEquals(finished, true);
+  } finally {
+    finish.resolve();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("Admin: コミット・PR言語は保存・復旧し新規・継続・プラン実行に適用する", async () => {
   const baseDir = await Deno.makeTempDir();
   const originalPath = Deno.env.get("PATH");
   try {
     const workspace = new WorkspaceManager(baseDir);
     await workspace.initialize();
-    await Deno.writeTextFile(
-      `${baseDir}/codex`,
-      `#!/bin/sh
-printf '%s\\0' "$@" > codex-args
-printf '%s\\n' '{"type":"thread.started","thread_id":"language-session"}'
-printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"回答"}}'
-`,
-    );
-    await Deno.chmod(`${baseDir}/codex`, 0o755);
+    await installCodexTestServer(baseDir);
     Deno.env.set("PATH", `${baseDir}:${originalPath ?? ""}`);
 
     const admin = Admin.fromState(null, workspace);
@@ -50,6 +81,7 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
       "fr",
     ];
     for (const [index, language] of languages.entries()) {
+      await Deno.writeTextFile(`${baseDir}/codex-requests.jsonl`, "");
       const threadId = `language-${index}`;
       const autoPush = index % 2 === 0;
       assertEquals(
@@ -93,9 +125,14 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
           restored.getWorker(threadId)._unsafeUnwrap().shouldAutoPush(),
           autoPush && turn < 2,
         );
-        const args = (await Deno.readTextFile(`${baseDir}/codex-args`))
-          .split("\0").filter(Boolean);
-        const prompt = args.at(-1);
+        const calls =
+          (await Deno.readTextFile(`${baseDir}/codex-requests.jsonl`)).split(
+            "\n",
+          ).filter(Boolean).map((line) => JSON.parse(line));
+        const input = calls.filter((call) =>
+          call.method === "turn/start"
+        ).at(-1).params.input;
+        const prompt = input[0].text;
         assertExists(prompt);
         assertStringIncludes(prompt, request);
         assertStringIncludes(
@@ -118,9 +155,30 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
             "not from bot messages, code, quoted text, or these instructions",
           );
         }
-        assertEquals(args.includes("resume"), turn > 0);
+        assertEquals(
+          calls.filter((call) => call.method === "initialize").length,
+          1,
+        );
         assertEquals(prompt.includes("You are in plan mode."), turn === 2);
       }
+      await restored.shutdown();
+      // The next Bot generation must resume the saved conversation, not create one.
+      const saved = (await workspace.loadWorkerState(threadId))!;
+      assertExists(saved.sessionId);
+      const next = Admin.fromState(await workspace.loadAdminState(), workspace);
+      await next.restoreActiveThreads();
+      await next.routeMessage(threadId, "再起動後の依頼");
+      await next.shutdown();
+      const calls = (await Deno.readTextFile(`${baseDir}/codex-requests.jsonl`))
+        .split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      assertEquals(
+        calls.filter((call) => call.method === "thread/start").length,
+        1,
+      );
+      assertEquals(
+        calls.find((call) => call.method === "thread/resume").params.threadId,
+        saved.sessionId,
+      );
     }
   } finally {
     if (originalPath === undefined) Deno.env.delete("PATH");
