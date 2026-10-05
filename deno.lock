@@ -1,5 +1,5 @@
 {
-  "version": "4",
+  "version": "5",
   "specifiers": {
     "npm:discord.js@^14.16.3": "14.26.3",
     "npm:neverthrow@8.2.0": "8.2.0"
@@ -64,7 +64,9 @@
       ]
     },
     "@rollup/rollup-linux-x64-gnu@4.60.2": {
-      "integrity": "sha512-UQjrkIdWrKI626Du8lCQ6MJp/6V1LAo2bOK9OTu4mSn8GGXIkPXk/Vsp4bLHCd9Z9Iz2OTEaokUE90VweJgIYQ=="
+      "integrity": "sha512-UQjrkIdWrKI626Du8lCQ6MJp/6V1LAo2bOK9OTu4mSn8GGXIkPXk/Vsp4bLHCd9Z9Iz2OTEaokUE90VweJgIYQ==",
+      "os": ["linux"],
+      "cpu": ["x64"]
     },
     "@sapphire/async-queue@1.5.5": {
       "integrity": "sha512-cvGzxbba6sav2zZkH8GPf2oGk9yYoD5qrNWdu9fRehifgnFZJMV+nuy2nON2roRO4yQQ+v7MK/Pktl/HgfsUXg=="
@@ -132,7 +134,7 @@
     },
     "neverthrow@8.2.0": {
       "integrity": "sha512-kOCT/1MCPAxY5iUV3wytNFUMUolzuwd/VF/1KCx7kf6CutrOsTie+84zTGTpgQycjvfLdBBdvBvFLqFD2c0wkQ==",
-      "dependencies": [
+      "optionalDependencies": [
         "@rollup/rollup-linux-x64-gnu"
       ]
     },
@@ -149,7 +151,11 @@
       "integrity": "sha512-sC+b0tB1whOCzbtlx20fx3WgCXwkW627p4EA9uM+/tNNPkSS+eSEld6pAs9nDv7WbY1UUljBMYPtu9BCOrCWKA=="
     },
     "ws@8.20.0": {
-      "integrity": "sha512-sAt8BhgNbzCtgGbt2OxmpuryO63ZoDk/sqaB/znQm94T4fCEsy/yV+7CdC1kJhOU9lboAEU7R3kquuycDoibVA=="
+      "integrity": "sha512-sAt8BhgNbzCtgGbt2OxmpuryO63ZoDk/sqaB/znQm94T4fCEsy/yV+7CdC1kJhOU9lboAEU7R3kquuycDoibVA==",
+      "optionalPeers": [
+        "bufferutil@^4.0.1",
+        "utf-8-validate@>=5.0.2"
+      ]
     }
   },
   "remote": {
@@ -279,7 +285,8 @@
     "https://deno.land/std@0.224.0/path/windows/relative.ts": "3e1abc7977ee6cc0db2730d1f9cb38be87b0ce4806759d271a70e4997fc638d7",
     "https://deno.land/std@0.224.0/path/windows/resolve.ts": "8dae1dadfed9d46ff46cc337c9525c0c7d959fb400a6308f34595c45bdca1972",
     "https://deno.land/std@0.224.0/path/windows/to_file_url.ts": "40e560ee4854fe5a3d4d12976cef2f4e8914125c81b11f1108e127934ced502e",
-    "https://deno.land/std@0.224.0/path/windows/to_namespaced_path.ts": "4ffa4fb6fae321448d5fe810b3ca741d84df4d7897e61ee29be961a6aac89a4c"
+    "https://deno.land/std@0.224.0/path/windows/to_namespaced_path.ts": "4ffa4fb6fae321448d5fe810b3ca741d84df4d7897e61ee29be961a6aac89a4c",
+    "https://deno.land/std@0.224.0/streams/text_line_stream.ts": "21f33d3922e019ec1a1676474beb543929cb564ec99b69cd2654e029e0f45bd5"
   },
   "workspace": {
     "dependencies": [

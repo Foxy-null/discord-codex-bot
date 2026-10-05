@@ -1,5 +1,5 @@
 import { err, ok, Result } from "neverthrow";
-import type { SavedAttachment } from "../attachments.ts";
+import type { MessageAttachments } from "../worker/types.ts";
 import type { IWorker } from "../worker/types.ts";
 import type { AdminError, DiscordMessage, IAdmin } from "./types.ts";
 import {
@@ -109,11 +109,12 @@ export class Admin implements IAdmin {
   async routeMessage(
     threadId: string,
     message: string,
-    attachments: readonly SavedAttachment[] = [],
+    attachments: MessageAttachments = [],
     onProgress?: (content: string) => Promise<void>,
     onReaction?: (emoji: string) => Promise<void>,
-  ): Promise<Result<string | DiscordMessage, AdminError>> {
-    let result: Result<string | DiscordMessage, MessageRouterError>;
+    onComplete?: (reply: string) => Promise<void>,
+  ): Promise<Result<string | DiscordMessage | null, AdminError>> {
+    let result: Result<string | DiscordMessage | null, MessageRouterError>;
     try {
       result = await this.messageRouter.routeMessage(
         threadId,
@@ -121,6 +122,7 @@ export class Admin implements IAdmin {
         attachments,
         onProgress,
         onReaction,
+        onComplete,
       );
     } catch (error) {
       return err({
@@ -189,7 +191,8 @@ export class Admin implements IAdmin {
   }
 
   async terminateThread(threadId: string): Promise<Result<void, AdminError>> {
-    this.workerManager.removeWorker(threadId);
+    const worker = this.workerManager.removeWorker(threadId);
+    await worker?.close();
     await this.workspaceManager.removeWorktree(threadId);
 
     const workerState = await this.workspaceManager.loadWorkerState(threadId);
@@ -210,6 +213,10 @@ export class Admin implements IAdmin {
 
     await this.logAudit(threadId, "thread_terminated", {});
     return ok(undefined);
+  }
+
+  async shutdown(): Promise<void> {
+    await this.workerManager.closeAll();
   }
 
   async closeThread(threadId: string): Promise<Result<void, AdminError>> {

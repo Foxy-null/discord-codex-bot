@@ -1,567 +1,564 @@
-import { assertEquals } from "std/assert/mod.ts";
-import { dirname, fromFileUrl } from "std/path/mod.ts";
-import { err, ok } from "neverthrow";
-import type { CodexCommandExecutor } from "../src/worker/codex-executor.ts";
+import { assert, assertEquals, assertStringIncludes } from "std/assert/mod.ts";
 import { Worker } from "../src/worker/worker.ts";
+import { CodexRpcError } from "../src/worker/codex-executor.ts";
 import { OUTPUT_ATTACHMENT_INSTRUCTIONS } from "../src/output-attachments.ts";
 import {
   type WorkerState,
   WorkspaceManager,
 } from "../src/workspace/workspace.ts";
+import { FakeCodexClient } from "./fixtures/fake-codex-client.ts";
 
-const testRoot = dirname(fromFileUrl(import.meta.url));
-const fixtureRoot = `${testRoot}/fixtures`;
-
-async function createTestDir(prefix: string): Promise<string> {
-  await Deno.mkdir(fixtureRoot, { recursive: true });
-  return await Deno.makeTempDir({ dir: fixtureRoot, prefix });
-}
-
-class FakeCodexExecutor implements CodexCommandExecutor {
-  public readonly executedArgs: string[][] = [];
-
-  constructor(
-    private readonly lines: readonly string[],
-    private readonly outputLastMessage?: string,
-    private readonly code = 0,
-    private readonly stderr = "",
-  ) {}
-
-  async executeStreaming(
-    args: string[],
-    _cwd: string,
-    onData: (data: Uint8Array) => void,
-  ) {
-    this.executedArgs.push(args);
-    const encoder = new TextEncoder();
-    onData(encoder.encode(this.lines.join("\n") + "\n"));
-    if (this.outputLastMessage !== undefined) {
-      const outputArgIndex = args.indexOf("--output-last-message");
-      const outputPath = args[outputArgIndex + 1];
-      await Deno.writeTextFile(outputPath, this.outputLastMessage);
-    }
-    return Promise.resolve(ok({
-      code: this.code,
-      stderr: new TextEncoder().encode(this.stderr),
-    }));
-  }
-}
-
-Deno.test("Worker: 自動プッシュは有効設定の正常終了後のみ許可する", async () => {
+async function setup(overrides: Partial<WorkerState> = {}) {
   const dir = await Deno.makeTempDir();
+  const workspace = new WorkspaceManager(dir);
+  await workspace.initialize();
+  const now = new Date().toISOString();
+  const state: WorkerState = {
+    workerName: "w1",
+    threadId: "discord-1",
+    repository: { fullName: "owner/repo", org: "owner", repo: "repo" },
+    worktreePath: dir,
+    status: "active",
+    createdAt: now,
+    lastActiveAt: now,
+    autoPush: true,
+    ...overrides,
+  };
+  const client = new FakeCodexClient();
+  const worker = new Worker(state, workspace, client);
+  return {
+    dir,
+    workspace,
+    state,
+    client,
+    worker,
+    async cleanup() {
+      await worker.close();
+      await Deno.remove(dir, { recursive: true });
+    },
+  };
+}
+
+Deno.test("Worker: 既存保存形式・作業コピー・会話ID・言語・設定を復元する", async () => {
+  const env = await setup({
+    sessionId: "old-thread",
+    autoPush: false,
+    isPlanMode: true,
+    commitPrLanguage: " ja ",
+  });
   try {
-    const workspace = new WorkspaceManager(dir);
-    await workspace.initialize();
-    const now = new Date().toISOString();
-    const scenarios = [
+    await env.worker.save();
+    const state = (await env.workspace.loadWorkerState("discord-1"))!;
+    const worker = await Worker.fromState(
+      state,
+      env.workspace,
+      undefined,
+      env.client,
+    );
+    assertEquals(
+      (await worker.processMessage("計画して"))._unsafeUnwrap(),
+      "回答",
+    );
+    assertEquals(env.client.calls[0].method, "thread/resume");
+    assertEquals(env.client.calls[0].params.threadId, "old-thread");
+    assertEquals(env.client.calls[0].params.cwd, env.dir);
+    const input = env.client.calls.find((c) => c.method === "turn/start")!
+      .params.input as { text: string }[];
+    assertStringIncludes(input[0].text, 'language specified by "ja"');
+    assertStringIncludes(input[0].text, "You are in plan mode.");
+    assertStringIncludes(input[0].text, OUTPUT_ATTACHMENT_INSTRUCTIONS);
+    assertEquals(worker.shouldAutoPush(), false);
+    assertEquals(
+      (await env.workspace.loadWorkerState("discord-1"))?.sessionId,
+      "old-thread",
+    );
+    await worker.close();
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: 初回準備中の入力を受信順にSteerし、会話IDを終了前に保存する", async () => {
+  const env = await setup();
+  env.client.autoComplete = false;
+  const prepared = Promise.withResolvers<void>();
+  let completions = 0;
+  try {
+    const first = env.worker.processMessage(
+      "最初",
+      async () => {
+        await prepared.promise;
+        return [];
+      },
+      undefined,
+      undefined,
+      async () => {
+        completions++;
+      },
+    );
+    const extra = env.worker.processMessage("追加");
+    assertEquals(env.client.calls.length, 0);
+    prepared.resolve();
+    const steer = await env.client.waitFor("turn/steer");
+    assertEquals(steer.params.threadId, "thread-1");
+    assertEquals(typeof steer.params.expectedTurnId, "string");
+    assertEquals((await extra)._unsafeUnwrap(), null);
+    assertEquals(
+      env.client.calls.filter((c) => c.method === "turn/start").length,
+      1,
+    );
+    assertEquals(
+      (await env.workspace.loadWorkerState("discord-1"))?.sessionId,
+      "thread-1",
+    );
+    assertEquals(completions, 0);
+    env.client.complete("thread-1");
+    assertEquals((await first)._unsafeUnwrap(), null);
+    assertEquals(completions, 1);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: 自動処理の成功判定をSteerで上書きせず、失敗・中断・プランでは許可しない", async () => {
+  for (
+    const scenario of [
       {
         autoPush: true,
         isPlanMode: false,
-        code: 0,
-        abort: false,
+        status: "completed",
         expected: true,
       },
       {
         autoPush: false,
         isPlanMode: false,
-        code: 0,
-        abort: false,
+        status: "completed",
         expected: false,
       },
       {
         autoPush: undefined,
         isPlanMode: false,
-        code: 0,
-        abort: false,
+        status: "completed",
         expected: false,
       },
       {
         autoPush: true,
         isPlanMode: true,
-        code: 0,
-        abort: false,
+        status: "completed",
         expected: false,
       },
+      { autoPush: true, isPlanMode: false, status: "failed", expected: false },
       {
         autoPush: true,
         isPlanMode: false,
-        code: 1,
-        abort: false,
+        status: "interrupted",
         expected: false,
       },
-      {
-        autoPush: true,
-        isPlanMode: false,
-        code: 0,
-        abort: true,
-        expected: false,
-      },
-    ];
-    for (const scenario of scenarios) {
-      const state: WorkerState = {
-        workerName: "test",
-        threadId: "thread-1",
-        repository: { fullName: "owner/repo", org: "owner", repo: "repo" },
-        worktreePath: dir,
-        status: "active",
-        createdAt: now,
-        lastActiveAt: now,
-        autoPush: scenario.autoPush,
-        isPlanMode: scenario.isPlanMode,
-      };
-      const executor: CodexCommandExecutor = scenario.abort
-        ? {
-          executeStreaming: async () => {
-            throw new DOMException("Stopped", "AbortError");
-          },
+    ]
+  ) {
+    const env = await setup({
+      autoPush: scenario.autoPush,
+      isPlanMode: scenario.isPlanMode,
+    });
+    env.client.status = scenario.status;
+    try {
+      await env.worker.processMessage("依頼");
+      assertEquals(env.worker.shouldAutoPush(), scenario.expected);
+      env.state.worktreePath = null;
+      assertEquals((await env.worker.processMessage("次の依頼")).isErr(), true);
+      assertEquals(env.worker.shouldAutoPush(), false);
+    } finally {
+      await env.cleanup();
+    }
+  }
+});
+
+Deno.test("Worker: 完了直前に拒否された追加指示だけを、後処理後の新しいターンへ渡す", async () => {
+  for (
+    const rejection of [
+      "no active turn to steer",
+      "expected active turn id `old` but found `new`",
+    ]
+  ) {
+    const env = await setup();
+    env.client.autoComplete = false;
+    try {
+      const first = env.worker.processMessage("最初");
+      await env.client.waitFor("turn/start");
+      env.client.hook = (method) => {
+        if (method === "turn/steer") {
+          env.client.complete("thread-1");
+          throw new CodexRpcError(-32600, rejection);
         }
-        : new FakeCodexExecutor([], "done", scenario.code);
-      const worker = new Worker(state, workspace, executor);
-      assertEquals(worker.shouldAutoPush(), false);
-      await worker.processMessage("依頼");
+      };
+      const extra = env.worker.processMessage("追加");
+      await env.client.waitFor("turn/start", 2);
+      env.client.complete("thread-1", "次の回答");
+      assertEquals((await extra)._unsafeUnwrap(), "次の回答");
+      assertEquals((await first)._unsafeUnwrap(), "回答");
       assertEquals(
-        worker.shouldAutoPush(),
-        scenario.expected,
-        JSON.stringify(scenario),
-      );
-      // A failed next request must clear the previous success.
-      state.worktreePath = null;
-      assertEquals((await worker.processMessage("次の依頼")).isErr(), true);
-      assertEquals(worker.shouldAutoPush(), false);
-    }
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
-
-Deno.test("Worker: 自動コミットの言語指定と会話履歴を引き継いで読み取り専用で生成する", async () => {
-  const dir = await Deno.makeTempDir();
-  try {
-    const workspace = new WorkspaceManager(dir);
-    await workspace.initialize();
-    for (const language of [undefined, "  ", "  en  ", "日本語"]) {
-      const commitMessage = "✨ 入力チェックを追加する";
-      const executor = new FakeCodexExecutor([
-        JSON.stringify({
-          type: "item.completed",
-          item: { type: "agent_message", text: commitMessage },
-        }),
-      ]);
-      const now = new Date().toISOString();
-      const worker = new Worker(
-        {
-          workerName: "test",
-          threadId: "thread-1",
-          repository: { fullName: "owner/repo", org: "owner", repo: "repo" },
-          worktreePath: dir,
-          sessionId: "session-1",
-          autoPush: true,
-          commitPrLanguage: language,
-          status: "active",
-          createdAt: now,
-          lastActiveAt: now,
-        },
-        workspace,
-        executor,
-      );
-      await worker.processMessage("入力チェックを追加して");
-      const result = await worker.generateCommitMessage(
-        "入力チェックを追加して",
-      );
-      assertEquals(result._unsafeUnwrap(), commitMessage);
-      assertEquals(worker.shouldAutoPush(), true);
-      const args = executor.executedArgs[1];
-      assertEquals(args[args.indexOf("--sandbox") + 1], "read-only");
-      assertEquals(
-        args.includes("--dangerously-bypass-approvals-and-sandbox"),
-        false,
-      );
-      assertEquals(args[args.indexOf("resume") + 1], "session-1");
-      const prompt = args.at(-1)!;
-      assertEquals(
-        prompt.includes(
-          language?.trim()
-            ? `language specified by ${JSON.stringify(language.trim())}`
-            : "language the user is using in this thread",
-        ),
-        true,
-      );
-      assertEquals(prompt.includes("git diff --cached"), true);
-    }
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
-
-Deno.test("Worker: メッセージ生成の失敗・空応答をコミット用文字列として返さない", async () => {
-  const dir = await Deno.makeTempDir();
-  try {
-    const workspace = new WorkspaceManager(dir);
-    const now = new Date().toISOString();
-    const scenarios: CodexCommandExecutor[] = [
-      new FakeCodexExecutor([], undefined),
-      new FakeCodexExecutor(
-        [
-          JSON.stringify({
-            type: "item.completed",
-            item: { type: "agent_message", text: "途中の候補" },
-          }),
-        ],
-        undefined,
+        env.client.calls.filter((c) => c.method === "thread/start").length,
         1,
-        "generation failed",
-      ),
-      {
-        executeStreaming: () =>
-          Promise.resolve(err({
-            type: "STREAM_PROCESSING_ERROR",
-            error: "stream failed",
-          })),
-      },
-      {
-        executeStreaming: () => {
-          throw new Error("executor failed");
-        },
-      },
-    ];
-    for (const executor of scenarios) {
-      const worker = new Worker(
-        {
-          workerName: "test",
-          threadId: "thread-1",
-          worktreePath: dir,
-          status: "active",
-          createdAt: now,
-          lastActiveAt: now,
-        },
-        workspace,
-        executor,
       );
-      assertEquals((await worker.generateCommitMessage("依頼")).isErr(), true);
-      assertEquals(worker.shouldAutoPush(), false);
+    } finally {
+      await env.cleanup();
     }
-  } finally {
-    await Deno.remove(dir, { recursive: true });
   }
 });
 
-Deno.test("Worker: 最終応答候補も進捗として送信し、添付指定は最終回答にだけ保持する", async () => {
-  const baseDir = await createTestDir("worker_test_");
-  const worktreePath = await createTestDir("worker_worktree_");
+Deno.test("Worker: コミット生成を一時的なread-only会話へ隔離し、入力と後処理を競合させない", async () => {
+  const env = await setup({ commitPrLanguage: "日本語" });
+  env.client.autoComplete = false;
+  const finish = Promise.withResolvers<void>();
+  const finalizing = Promise.withResolvers<void>();
   try {
-    const workspaceManager = new WorkspaceManager(baseDir);
-    await workspaceManager.initialize();
-
-    const now = new Date().toISOString();
-    const state: WorkerState = {
-      workerName: "w1",
-      threadId: "thread-1",
-      repository: {
-        fullName: "owner/repo",
-        org: "owner",
-        repo: "repo",
-      },
-      repositoryLocalPath: worktreePath,
-      worktreePath,
-      sessionId: null,
-      status: "active",
-      createdAt: now,
-      lastActiveAt: now,
-    };
-
-    const executor = new FakeCodexExecutor([
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          id: "item_0",
-          type: "agent_message",
-          text: "途中ログです。",
-        },
-      }),
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          id: "item_1",
-          type: "agent_message",
-          text: "最終返信です。\n[[attachment:reports/result.pdf]]",
-        },
-      }),
-      JSON.stringify({
-        type: "turn.completed",
-        session_id: "session-1",
-      }),
-    ]);
-
-    const worker = new Worker(state, workspaceManager, executor);
-    const progress: string[] = [];
-    const result = await worker.processMessage(
-      "依頼",
+    const first = env.worker.processMessage(
+      "最初",
       [],
-      (content) => {
-        progress.push(content);
-        return Promise.resolve();
+      undefined,
+      undefined,
+      async () => {
+        finalizing.resolve();
+        const generated = await env.worker.generateCommitMessage("最初");
+        assertEquals(generated._unsafeUnwrap(), "📝 変更を記録");
+        await finish.promise;
       },
     );
+    await env.client.waitFor("turn/start");
+    env.client.complete("thread-1");
+    await finalizing.promise;
+    const extra = env.worker.processMessage("追加");
+    const internal = await env.client.waitFor("thread/start", 2);
+    assertEquals(internal.params.ephemeral, true);
+    assertEquals(internal.params.sandbox, "read-only");
+    const commitTurn = await env.client.waitFor("turn/start", 2);
+    assertEquals(commitTurn.params.threadId, "internal-2");
+    const input = commitTurn.params.input as { text: string }[];
+    assertStringIncludes(input[0].text, "git diff --cached");
+    assertStringIncludes(input[0].text, 'language specified by "日本語"');
+    env.client.complete("internal-2", "📝 変更を記録");
+    await env.client.waitFor("thread/unsubscribe");
+    assertEquals(
+      env.client.calls.filter((c) => c.method === "turn/steer").length,
+      0,
+    );
+    assertEquals(
+      env.client.calls.filter((c) => c.method === "turn/start").length,
+      2,
+    );
+    finish.resolve();
+    await first;
+    await env.client.waitFor("turn/start", 3);
+    env.client.complete("thread-1", "追加の回答");
+    assertEquals((await extra)._unsafeUnwrap(), "追加の回答");
+    assertEquals(env.state.sessionId, "thread-1");
+  } finally {
+    finish.resolve();
+    await env.cleanup();
+  }
+});
 
-    assertEquals(result.isOk(), true);
+Deno.test("Worker: 通常停止はターンを中断し、同じ接続と会話で次の依頼を開始する", async () => {
+  const env = await setup();
+  env.client.autoComplete = false;
+  try {
+    const first = env.worker.processMessage("最初");
+    await env.client.waitFor("turn/start");
+    assertEquals(await env.worker.stopExecution(), true);
+    assertStringIncludes((await first)._unsafeUnwrap()!, "中断");
+    assertEquals(env.worker.shouldAutoPush(), false);
+    assertEquals(env.client.closed, false);
+    const second = env.worker.processMessage("次の依頼");
+    await env.client.waitFor("turn/start", 2);
+    env.client.complete("thread-1");
+    await second;
     assertEquals(
-      result._unsafeUnwrap(),
-      "最終返信です。\n[[attachment:reports/result.pdf]]",
+      env.client.calls.filter((c) => c.method === "thread/start").length,
+      1,
     );
-    assertEquals(progress.includes("途中ログです。"), true);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: 起動中に追加入力があっても停止が入力待ちと相互に待たない", async () => {
+  const env = await setup({ sessionId: "old-thread" });
+  env.client.autoComplete = false;
+  const resumed = Promise.withResolvers<void>();
+  env.client.hook = async (method) => {
+    if (method === "thread/resume") await resumed.promise;
+  };
+  try {
+    const first = env.worker.processMessage("最初");
+    await env.client.waitFor("thread/resume");
+    const extra = env.worker.processMessage("追加");
+    const stopped = env.worker.stopExecution();
+    resumed.resolve();
+    await env.client.waitFor("turn/interrupt");
+    assertEquals(await stopped, true);
+    assertStringIncludes((await first)._unsafeUnwrap()!, "中断");
+    await env.client.waitFor("turn/start", 2);
+    env.client.complete("old-thread");
+    assertEquals((await extra)._unsafeUnwrap(), "回答");
+  } finally {
+    resumed.resolve();
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: コミット生成の起動途中でも停止し、完了との競合でも自動プッシュしない", async () => {
+  const env = await setup();
+  env.client.autoComplete = false;
+  const started = Promise.withResolvers<void>();
+  env.client.hook = async (method, params) => {
+    if (method === "thread/start" && params.ephemeral) await started.promise;
+  };
+  try {
+    const generated = env.worker.generateCommitMessage("依頼");
+    await env.client.waitFor("thread/start");
+    const stopped = env.worker.stopExecution();
+    started.resolve();
+    await env.client.waitFor("turn/interrupt");
+    assertEquals(await stopped, true);
+    assertEquals((await generated).isErr(), true);
+    assertEquals(env.state.sessionId, undefined);
+    env.client.hook = (method) => {
+      if (method === "turn/interrupt") env.client.complete("thread-2");
+    };
+    const first = env.worker.processMessage("次の依頼");
+    await env.client.waitFor("turn/start", 2);
+    assertEquals(await env.worker.stopExecution(), true);
+    await first;
+    assertEquals(env.worker.shouldAutoPush(), false);
+  } finally {
+    started.resolve();
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: 添付の準備中に完了しても、途中出力と後処理を終えてから次のターンを始める", async () => {
+  const env = await setup();
+  env.client.autoComplete = false;
+  const preparing = Promise.withResolvers<void>();
+  const prepared = Promise.withResolvers<void>();
+  const progress = Promise.withResolvers<void>();
+  const finalizing = Promise.withResolvers<void>();
+  const finalized = Promise.withResolvers<void>();
+  try {
+    const first = env.worker.processMessage(
+      "最初",
+      [],
+      async (text) => {
+        if (text === "回答") await progress.promise;
+      },
+      undefined,
+      async () => {
+        finalizing.resolve();
+        await finalized.promise;
+      },
+    );
+    await env.client.waitFor("turn/start");
+    const extra = env.worker.processMessage("追加", async () => {
+      preparing.resolve();
+      await prepared.promise;
+      return [];
+    });
+    await preparing.promise;
+    env.client.complete("thread-1");
+    prepared.resolve();
+    progress.resolve();
+    await finalizing.promise;
     assertEquals(
-      progress.some((text) => text.trim() === "最終返信です。"),
-      true,
+      env.client.calls.filter((c) => c.method === "turn/start").length,
+      1,
     );
+    assertEquals(
+      env.client.calls.filter((c) => c.method === "turn/steer").length,
+      0,
+    );
+    finalized.resolve();
+    await first;
+    await env.client.waitFor("turn/start", 2);
+    env.client.complete("thread-1");
+    assertEquals((await extra)._unsafeUnwrap(), "回答");
+  } finally {
+    prepared.resolve();
+    progress.resolve();
+    finalized.resolve();
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: 接続障害や任意のSteerエラーを自動再送せず、既存会話を保持する", async () => {
+  const env = await setup({ sessionId: "old-thread" });
+  env.client.autoComplete = false;
+  try {
+    const first = env.worker.processMessage("最初");
+    await env.client.waitFor("turn/start");
+    env.client.hook = (method) => {
+      if (method === "turn/steer") {
+        throw new CodexRpcError(-32603, "connection lost");
+      }
+    };
+    assertEquals((await env.worker.processMessage("追加")).isErr(), true);
+    assertEquals(
+      env.client.calls.filter((c) => c.method === "turn/start").length,
+      1,
+    );
+    env.client.onFailure(new Error("connection lost API_KEY=secret-value"));
+    const error = (await first)._unsafeUnwrapErr();
+    assert(error.type === "CODEX_EXECUTION_FAILED");
+    assertEquals(error.error.includes("secret-value"), false);
+    assertEquals(env.state.sessionId, "old-thread");
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: 初回失敗・中断でも会話IDを保存し、復元失敗で新規会話を作らない", async () => {
+  for (const status of ["failed", "interrupted"]) {
+    const env = await setup();
+    env.client.status = status;
+    try {
+      await env.worker.processMessage("依頼");
+      assertEquals(
+        (await env.workspace.loadWorkerState("discord-1"))?.sessionId,
+        "thread-1",
+      );
+    } finally {
+      await env.cleanup();
+    }
+  }
+  const env = await setup({ sessionId: "missing-thread" });
+  try {
+    env.client.hook = (method) => {
+      if (method === "thread/resume") {
+        throw new CodexRpcError(-32600, "thread not found");
+      }
+    };
+    assertEquals((await env.worker.processMessage("依頼")).isErr(), true);
+    assertEquals(
+      env.client.calls.some((c) => c.method === "thread/start"),
+      false,
+    );
+    assertEquals(env.state.sessionId, "missing-thread");
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: 添付・途中出力・進捗エラーを処理し、commentaryで最終回答を上書きしない", async () => {
+  const env = await setup();
+  env.client.autoComplete = false;
+  const progress: string[] = [];
+  try {
+    const request = env.worker.processMessage("画像を見て", [{
+      id: "1",
+      originalName: "image.png",
+      savedName: "image.png",
+      path: env.dir + "/image.png",
+      contentType: "image/png",
+      size: 0,
+      url: "",
+      isImage: true,
+    }], async (text) => {
+      progress.push(text);
+    });
+    const call = await env.client.waitFor("turn/start");
+    assertEquals(
+      (call.params.input as { type: string }[])[1].type,
+      "localImage",
+    );
+    env.client.onNotification("item/started", {
+      threadId: "thread-1",
+      item: { type: "contextCompaction" },
+    });
+    env.client.onNotification("item/completed", {
+      threadId: "thread-1",
+      item: { type: "contextCompaction" },
+    });
+    env.client.onNotification("item/completed", {
+      threadId: "thread-1",
+      item: { type: "reasoning", summary: ["方針を確認中"] },
+    });
+    env.client.onNotification("item/completed", {
+      threadId: "thread-1",
+      item: {
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "回答\n[[attachment:report.pdf]]",
+      },
+    });
+    env.client.onNotification("item/completed", {
+      threadId: "thread-1",
+      item: { type: "agentMessage", phase: "commentary", text: "途中出力" },
+    });
+    env.client.finish("thread-1");
+    assertEquals(
+      (await request)._unsafeUnwrap(),
+      "回答\n[[attachment:report.pdf]]",
+    );
+    assert(progress.includes("コンテキスト圧縮が完了しました。"));
+    assert(progress.includes("方針を確認中"));
     assertEquals(
       progress.some((text) => text.includes("[[attachment:")),
       false,
     );
+    const original = console.error;
+    console.error = () => {};
+    try {
+      env.client.autoComplete = true;
+      assertEquals(
+        (await env.worker.processMessage("次", [], async () => {
+          throw new Error("Discord unavailable");
+        })).isOk(),
+        true,
+      );
+    } finally {
+      console.error = original;
+    }
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: 終了時にターンを中断・接続を回収し、終了後の入力を拒否する", async () => {
+  const env = await setup();
+  env.client.autoComplete = false;
+  try {
+    const request = env.worker.processMessage("最初");
+    await env.client.waitFor("turn/start");
+    await env.worker.close();
+    await request;
+    assertEquals(env.client.closed, true);
+    assertEquals((await env.worker.processMessage("追加")).isErr(), true);
     assertEquals(
-      executor.executedArgs[0].at(-1)?.includes(OUTPUT_ATTACHMENT_INSTRUCTIONS),
-      true,
-    );
-  } finally {
-    await Deno.remove(baseDir, { recursive: true });
-    await Deno.remove(worktreePath, { recursive: true });
-  }
-});
-
-Deno.test("Worker: compactイベントを進捗として送信する", async () => {
-  const baseDir = await createTestDir("worker_test_");
-  const worktreePath = await createTestDir("worker_worktree_");
-  try {
-    const workspaceManager = new WorkspaceManager(baseDir);
-    await workspaceManager.initialize();
-
-    const now = new Date().toISOString();
-    const state: WorkerState = {
-      workerName: "w1",
-      threadId: "thread-1",
-      repository: {
-        fullName: "owner/repo",
-        org: "owner",
-        repo: "repo",
-      },
-      repositoryLocalPath: worktreePath,
-      worktreePath,
-      sessionId: "session-1",
-      status: "active",
-      createdAt: now,
-      lastActiveAt: now,
-    };
-
-    const executor = new FakeCodexExecutor([
-      JSON.stringify({
-        type: "context.compaction.started",
-        trigger: "auto",
-      }),
-      JSON.stringify({
-        type: "context.compaction.completed",
-        trigger: "auto",
-      }),
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          id: "item_0",
-          type: "agent_message",
-          text: "最終返信です。",
-        },
-      }),
-      JSON.stringify({
-        type: "turn.completed",
-        session_id: "session-1",
-      }),
-    ]);
-
-    const worker = new Worker(state, workspaceManager, executor);
-    const progress: string[] = [];
-    const result = await worker.processMessage(
-      "依頼",
-      [],
-      (content) => {
-        progress.push(content);
-        return Promise.resolve();
-      },
-    );
-
-    assertEquals(result.isOk(), true);
-    assertEquals(progress.includes("コンテキスト圧縮を開始しました。"), true);
-    assertEquals(progress.includes("コンテキスト圧縮が完了しました。"), true);
-  } finally {
-    await Deno.remove(baseDir, { recursive: true });
-    await Deno.remove(worktreePath, { recursive: true });
-  }
-});
-
-Deno.test("Worker: 進捗通知が失敗してもCodex処理は継続する", async () => {
-  const baseDir = await createTestDir("worker_test_");
-  const worktreePath = await createTestDir("worker_worktree_");
-  const originalConsoleError = console.error;
-  console.error = () => {};
-  try {
-    const workspaceManager = new WorkspaceManager(baseDir);
-    await workspaceManager.initialize();
-
-    const now = new Date().toISOString();
-    const state: WorkerState = {
-      workerName: "w1",
-      threadId: "thread-1",
-      repository: {
-        fullName: "owner/repo",
-        org: "owner",
-        repo: "repo",
-      },
-      repositoryLocalPath: worktreePath,
-      worktreePath,
-      sessionId: null,
-      status: "active",
-      createdAt: now,
-      lastActiveAt: now,
-    };
-
-    const executor = new FakeCodexExecutor([
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          id: "item_1",
-          type: "agent_message",
-          text: "最終返信です。",
-        },
-      }),
-      JSON.stringify({
-        type: "turn.completed",
-        session_id: "session-1",
-      }),
-    ]);
-
-    const worker = new Worker(state, workspaceManager, executor);
-    let progressAttempts = 0;
-    const result = await worker.processMessage(
-      "依頼",
-      [],
-      () => {
-        progressAttempts += 1;
-        return Promise.reject(new Error("discord bad request"));
-      },
-    );
-
-    assertEquals(result.isOk(), true);
-    assertEquals(result._unsafeUnwrap(), "最終返信です。");
-    assertEquals(progressAttempts > 0, true);
-  } finally {
-    console.error = originalConsoleError;
-    await Deno.remove(baseDir, { recursive: true });
-    await Deno.remove(worktreePath, { recursive: true });
-  }
-});
-
-Deno.test("Worker: Codex非ゼロ終了時に診断情報を返してrawログを保存する", async () => {
-  const baseDir = await createTestDir("worker_test_");
-  const worktreePath = await createTestDir("worker_worktree_");
-  try {
-    const workspaceManager = new WorkspaceManager(baseDir);
-    await workspaceManager.initialize();
-
-    const now = new Date().toISOString();
-    const state: WorkerState = {
-      workerName: "w1",
-      threadId: "thread-1",
-      repository: {
-        fullName: "owner/repo",
-        org: "owner",
-        repo: "repo",
-      },
-      repositoryLocalPath: worktreePath,
-      worktreePath,
-      sessionId: "session-1",
-      status: "active",
-      createdAt: now,
-      lastActiveAt: now,
-    };
-
-    const executor = new FakeCodexExecutor(
-      [
-        JSON.stringify({
-          type: "item.completed",
-          item: {
-            id: "item_1",
-            type: "agent_message",
-            text: "stdout側の失敗理由です。",
-          },
-        }),
-      ],
-      "last message側の失敗理由です。",
+      env.client.calls.filter((c) => c.method === "turn/start").length,
       1,
-      "stderr側の失敗理由です。",
     );
-    const worker = new Worker(state, workspaceManager, executor);
-
-    const result = await worker.processMessage("依頼");
-
-    assertEquals(result.isErr(), true);
-    const error = result._unsafeUnwrapErr();
-    assertEquals(error.type, "CODEX_EXECUTION_FAILED");
-    if (error.type !== "CODEX_EXECUTION_FAILED") {
-      throw new Error("expected CODEX_EXECUTION_FAILED");
-    }
-    assertEquals(error.error.includes("終了コード: 1"), true);
-    assertEquals(error.error.includes("stderr側の失敗理由です。"), true);
-    assertEquals(error.error.includes("last message側の失敗理由です。"), true);
-    assertEquals(error.error.includes("stdout側の失敗理由です。"), true);
-    assertEquals(error.error.includes("保存ログ:"), true);
   } finally {
-    await Deno.remove(baseDir, { recursive: true });
-    await Deno.remove(worktreePath, { recursive: true });
+    await env.cleanup();
   }
 });
 
-Deno.test("Worker: TMPDIRが壊れていてもWORK_BASE_DIRの一時ファイルを使う", async () => {
-  const baseDir = await createTestDir("worker_test_");
-  const worktreePath = await createTestDir("worker_worktree_");
-  const originalTmpDir = Deno.env.get("TMPDIR");
+Deno.test("Worker: 別の作業スレッドを独立して並行実行する", async () => {
+  const first = await setup();
+  const second = await setup({ threadId: "discord-2" });
+  first.client.autoComplete = false;
+  second.client.autoComplete = false;
   try {
-    const workspaceManager = new WorkspaceManager(baseDir);
-    await workspaceManager.initialize();
-
-    const now = new Date().toISOString();
-    const state: WorkerState = {
-      workerName: "w1",
-      threadId: "thread-1",
-      repository: {
-        fullName: "owner/repo",
-        org: "owner",
-        repo: "repo",
-      },
-      repositoryLocalPath: worktreePath,
-      worktreePath,
-      sessionId: null,
-      status: "active",
-      createdAt: now,
-      lastActiveAt: now,
-    };
-
-    Deno.env.set("TMPDIR", "tmpfile");
-    const executor = new FakeCodexExecutor([], "ファイル由来の最終返信です。");
-    const worker = new Worker(state, workspaceManager, executor);
-    const result = await worker.processMessage("依頼");
-
-    assertEquals(result.isOk(), true);
-    assertEquals(result._unsafeUnwrap(), "ファイル由来の最終返信です。");
-
-    const args = executor.executedArgs[0];
-    const outputPath = args[args.indexOf("--output-last-message") + 1];
-    assertEquals(
-      outputPath.startsWith(`${workspaceManager.getTempDir()}/`),
-      true,
-    );
+    const a = first.worker.processMessage("依頼1");
+    const b = second.worker.processMessage("依頼2");
+    await Promise.all([
+      first.client.waitFor("turn/start"),
+      second.client.waitFor("turn/start"),
+    ]);
+    second.client.complete("thread-1", "回答2");
+    assertEquals((await b)._unsafeUnwrap(), "回答2");
+    first.client.complete("thread-1", "回答1");
+    assertEquals((await a)._unsafeUnwrap(), "回答1");
   } finally {
-    if (originalTmpDir === undefined) {
-      Deno.env.delete("TMPDIR");
-    } else {
-      Deno.env.set("TMPDIR", originalTmpDir);
-    }
-    await Deno.remove(baseDir, { recursive: true });
-    await Deno.remove(worktreePath, { recursive: true });
+    await first.cleanup();
+    await second.cleanup();
   }
 });

@@ -658,9 +658,25 @@ client.on(Events.ThreadUpdate, (oldThread, newThread) => {
   });
 });
 
+let shuttingDown = false;
+const shutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  void admin.shutdown().then(() => {
+    client.destroy();
+    Deno.exit(0);
+  }).catch((error) => {
+    console.error("[Shutdown]", error);
+    client.destroy();
+    Deno.exit(1);
+  });
+};
+Deno.addSignalListener("SIGINT", shutdown);
+Deno.addSignalListener("SIGTERM", shutdown);
+
 client.on(Events.MessageCreate, (message) => {
   void runSafely("MessageCreate", async () => {
-    if (message.author.bot) return;
+    if (shuttingDown || message.author.bot) return;
     if (!message.channel.isThread()) return;
     if (message.content.startsWith("!")) return;
 
@@ -678,19 +694,6 @@ client.on(Events.MessageCreate, (message) => {
       return;
     }
 
-    let isFirstUserMessage = false;
-    try {
-      const threadInfo = await workspaceManager.loadThreadInfo(threadId);
-      if (threadInfo && !threadInfo.firstUserMessageReceivedAt) {
-        isFirstUserMessage = true;
-        threadInfo.firstUserMessageReceivedAt = new Date().toISOString();
-        threadInfo.autoRenamedByFirstMessage = false;
-        await workspaceManager.saveThreadInfo(threadInfo);
-      }
-    } catch (error) {
-      console.error("[ThreadRename] first-message tracking failed", error);
-    }
-
     let lastProgressMessageUrl: string | null = null;
     const onProgress = async (content: string) => {
       for (const chunk of chunkDiscordContent(content)) {
@@ -706,39 +709,235 @@ client.on(Events.MessageCreate, (message) => {
       await message.react(emoji).catch(() => {});
     };
 
-    const startStatusResult = await getAndApplyCodexStatus(Deno.cwd());
-    const startStatus = startStatusResult.isOk()
-      ? startStatusResult.value
-      : null;
-
-    const attachmentInputs = getAttachmentDownloadInputs(message);
-    let savedAttachments: SavedAttachment[] = [];
-    if (attachmentInputs.length > 0) {
-      await onProgress(
-        `📎 添付ファイル ${attachmentInputs.length} 件を保存しています...`,
-      );
+    let isFirstUserMessage = false;
+    let startStatusResult: Awaited<ReturnType<typeof getAndApplyCodexStatus>>;
+    const prepareAttachments = async (): Promise<
+      readonly SavedAttachment[]
+    > => {
       try {
-        savedAttachments = await workspaceManager.saveMessageAttachments(
-          threadId,
-          message.id,
-          attachmentInputs,
-        );
-        await onReaction("📎");
+        const threadInfo = await workspaceManager.loadThreadInfo(threadId);
+        if (threadInfo && !threadInfo.firstUserMessageReceivedAt) {
+          isFirstUserMessage = true;
+          threadInfo.firstUserMessageReceivedAt = new Date().toISOString();
+          threadInfo.autoRenamedByFirstMessage = false;
+          await workspaceManager.saveThreadInfo(threadInfo);
+        }
       } catch (error) {
-        await sendThreadMessage(
-          thread,
-          `添付ファイルの保存に失敗しました: ${(error as Error).message}`,
-        );
-        return;
+        console.error("[ThreadRename] first-message tracking failed", error);
       }
-    }
+
+      startStatusResult = await getAndApplyCodexStatus(Deno.cwd());
+
+      const attachmentInputs = getAttachmentDownloadInputs(message);
+      let savedAttachments: SavedAttachment[] = [];
+      if (attachmentInputs.length > 0) {
+        await onProgress(
+          `📎 添付ファイル ${attachmentInputs.length} 件を保存しています...`,
+        );
+        try {
+          savedAttachments = await workspaceManager.saveMessageAttachments(
+            threadId,
+            message.id,
+            attachmentInputs,
+          );
+          await onReaction("📎");
+        } catch (error) {
+          throw new Error(
+            `添付ファイルの保存に失敗しました: ${(error as Error).message}`,
+          );
+        }
+      }
+
+      return savedAttachments;
+    };
+    const onComplete = async (reply: string): Promise<void> => {
+      const startStatus = startStatusResult.isOk()
+        ? startStatusResult.value
+        : null;
+      const output = parseOutputAttachments(
+        reply,
+      );
+      const replyContent = output.content.trim();
+      const endStatusResult = await getAndApplyCodexStatus(Deno.cwd());
+      const endStatus = endStatusResult.isOk() ? endStatusResult.value : null;
+      const finalReply = replyContent.trim() === MESSAGES.NO_FINAL_RESPONSE &&
+          lastProgressMessageUrl
+        ? `Codexの最終テキストを取得できなかったため、直近の出力を参照してください。\n> ${lastProgressMessageUrl}`
+        : replyContent;
+      const statusUnavailableNote = formatCodexStatusUnavailableNote(
+        endStatusResult.isErr()
+          ? endStatusResult.error
+          : startStatusResult.isErr()
+          ? startStatusResult.error
+          : undefined,
+      );
+      const replyWithStatus = startStatus && endStatus
+        ? `${finalReply}\n\`\`\`kotlin\n${
+          formatCodexStatusDelta(startStatus, endStatus)
+        }\n\`\`\``
+        : statusUnavailableNote
+        ? `${finalReply}\n${statusUnavailableNote}`
+        : finalReply;
+      const chunks = chunkDiscordContent(replyWithStatus);
+      if (chunks.length > 0) {
+        await replyToThreadMessage(message, chunks[0]);
+      }
+      for (const chunk of chunks.slice(1)) {
+        await sendThreadMessage(thread, chunk);
+      }
+
+      if (output.paths.length > 0) {
+        const workerState = await workspaceManager.loadWorkerState(threadId)
+          .catch(
+            (error) => {
+              console.error(
+                "[OutputAttachments] worker state lookup failed",
+                error,
+              );
+              return null;
+            },
+          );
+        const failures = await sendOutputAttachments(
+          output.paths,
+          workerState?.worktreePath,
+          (file) => sendThreadMessage(thread, { files: [file] }),
+        );
+        for (const failure of failures) {
+          console.error("[OutputAttachments]", failure);
+          for (const chunk of chunkDiscordContent(failure)) {
+            await sendThreadMessage(thread, {
+              content: chunk,
+              allowedMentions: { parse: [] },
+            }).catch((error) =>
+              console.error(
+                "[OutputAttachments] failure notification failed",
+                error,
+              )
+            );
+          }
+        }
+      }
+
+      if (isFirstUserMessage && message.content.trim()) {
+        try {
+          const threadInfo = await workspaceManager.loadThreadInfo(threadId);
+          const workerState = await workspaceManager.loadWorkerState(threadId);
+          if (threadInfo && workerState?.worktreePath) {
+            const canAutoRename = DEFAULT_THREAD_NAME_PATTERN.test(thread.name);
+            let fallbackName = "";
+            const names = await generateConversationNamesWithCodex(
+              message.content,
+              replyContent,
+              threadInfo.repositoryFullName ?? undefined,
+              workerState.worktreePath,
+              env.CODEX_THREAD_NAMING_MODEL,
+              env.CODEX_THREAD_NAMING_INSTRUCTIONS,
+              async (error, attempt) => {
+                console.error(
+                  `[ThreadRename] metadata generation failed (attempt ${attempt})`,
+                  error,
+                );
+
+                if (attempt === 1 && canAutoRename) {
+                  fallbackName = fallbackThreadName(message.content);
+                  if (fallbackName) {
+                    await thread.setName(fallbackName).then(() => {
+                      threadInfo.autoRenamedByFirstMessage = true;
+                    }).catch((error) =>
+                      console.error(
+                        "[ThreadRename] fallback rename failed",
+                        error,
+                      )
+                    );
+                  }
+                }
+              },
+            );
+
+            if (names.isOk()) {
+              if (
+                canAutoRename &&
+                (DEFAULT_THREAD_NAME_PATTERN.test(thread.name) ||
+                  thread.name === fallbackName)
+              ) {
+                await thread.setName(names.value.threadName).catch((error) =>
+                  console.error("[ThreadRename] Discord rename failed", error)
+                );
+              }
+              const branch = await renameInitialBranch(
+                workerState.worktreePath,
+                workerState.workerName,
+                names.value.branchName,
+                threadId,
+              );
+              if (branch.isErr()) {
+                console.error("[ThreadRename] Git rename failed", branch.error);
+              }
+              threadInfo.autoRenamedByFirstMessage = true;
+            }
+            await workspaceManager.saveThreadInfo(threadInfo);
+          }
+        } catch (error) {
+          console.error("[ThreadRename] post-response rename failed", error);
+        }
+      }
+
+      if (workerResult.value.shouldAutoPush()) {
+        const workerState = await workspaceManager.loadWorkerState(threadId);
+        if (workerState?.worktreePath) {
+          const pushed = await commitAndPushWorktreeBranch(
+            workerState.worktreePath,
+            () => workerResult.value.generateCommitMessage(message.content),
+          );
+          if (pushed.isErr()) {
+            console.error("[AutoPush] commit or push failed", pushed.error);
+            const operation =
+              pushed.error.type === "COMMAND_EXECUTION_FAILED" &&
+                pushed.error.command === "git push --set-upstream origin HEAD"
+                ? "自動プッシュ"
+                : "自動コミット";
+            const detail = pushed.error.type === "COMMAND_EXECUTION_FAILED"
+              ? pushed.error.error
+              : pushed.error.type;
+            for (
+              const chunk of chunkDiscordContent(
+                `${operation}に失敗しました。作業内容はローカルに残っています。\n${
+                  formatErrorDetail(detail)
+                }`,
+              )
+            ) {
+              await sendThreadMessage(thread, chunk);
+            }
+          } else {
+            const lines: string[] = [];
+            if (pushed.value.commitMessage) {
+              lines.push(`自動コミット完了: ${pushed.value.commitMessage}`);
+            }
+            if (pushed.value.branch) {
+              lines.push(`自動プッシュ完了: origin/${pushed.value.branch}`);
+            }
+            if (pushed.value.hasUncommittedChanges) {
+              lines.push(
+                "未コミットの変更が残っています。この変更は別環境では取得できません。",
+              );
+            }
+            if (lines.length > 0) {
+              for (const chunk of chunkDiscordContent(lines.join("\n"))) {
+                await sendThreadMessage(thread, chunk);
+              }
+            }
+          }
+        }
+      }
+    };
 
     const result = await admin.routeMessage(
       threadId,
       message.content,
-      savedAttachments,
+      prepareAttachments,
       onProgress,
       onReaction,
+      onComplete,
     );
 
     if (result.isErr()) {
@@ -768,180 +967,12 @@ client.on(Events.MessageCreate, (message) => {
       }
       return;
     }
-
-    const reply = result.value;
-    const output = parseOutputAttachments(
-      typeof reply === "string" ? reply : reply.content,
-    );
-    const replyContent = output.content.trim();
-    const endStatusResult = await getAndApplyCodexStatus(Deno.cwd());
-    const endStatus = endStatusResult.isOk() ? endStatusResult.value : null;
-    const finalReply = replyContent.trim() === MESSAGES.NO_FINAL_RESPONSE &&
-        lastProgressMessageUrl
-      ? `Codexの最終テキストを取得できなかったため、直近の出力を参照してください。\n> ${lastProgressMessageUrl}`
-      : replyContent;
-    const statusUnavailableNote = formatCodexStatusUnavailableNote(
-      endStatusResult.isErr()
-        ? endStatusResult.error
-        : startStatusResult.isErr()
-        ? startStatusResult.error
-        : undefined,
-    );
-    const replyWithStatus = startStatus && endStatus
-      ? `${finalReply}\n\`\`\`kotlin\n${
-        formatCodexStatusDelta(startStatus, endStatus)
-      }\n\`\`\``
-      : statusUnavailableNote
-      ? `${finalReply}\n${statusUnavailableNote}`
-      : finalReply;
-    const chunks = chunkDiscordContent(replyWithStatus);
-    if (chunks.length > 0) {
-      await replyToThreadMessage(message, chunks[0]);
-    }
-    for (const chunk of chunks.slice(1)) {
-      await sendThreadMessage(thread, chunk);
-    }
-
-    if (output.paths.length > 0) {
-      const workerState = await workspaceManager.loadWorkerState(threadId)
-        .catch(
-          (error) => {
-            console.error(
-              "[OutputAttachments] worker state lookup failed",
-              error,
-            );
-            return null;
-          },
-        );
-      const failures = await sendOutputAttachments(
-        output.paths,
-        workerState?.worktreePath,
-        (file) => sendThreadMessage(thread, { files: [file] }),
-      );
-      for (const failure of failures) {
-        console.error("[OutputAttachments]", failure);
-        for (const chunk of chunkDiscordContent(failure)) {
-          await sendThreadMessage(thread, {
-            content: chunk,
-            allowedMentions: { parse: [] },
-          }).catch((error) =>
-            console.error(
-              "[OutputAttachments] failure notification failed",
-              error,
-            )
-          );
-        }
-      }
-    }
-
-    if (isFirstUserMessage && message.content.trim()) {
-      try {
-        const threadInfo = await workspaceManager.loadThreadInfo(threadId);
-        const workerState = await workspaceManager.loadWorkerState(threadId);
-        if (threadInfo && workerState?.worktreePath) {
-          const canAutoRename = DEFAULT_THREAD_NAME_PATTERN.test(thread.name);
-          let fallbackName = "";
-          const names = await generateConversationNamesWithCodex(
-            message.content,
-            replyContent,
-            threadInfo.repositoryFullName ?? undefined,
-            workerState.worktreePath,
-            env.CODEX_THREAD_NAMING_MODEL,
-            env.CODEX_THREAD_NAMING_INSTRUCTIONS,
-            async (error, attempt) => {
-              console.error(
-                `[ThreadRename] metadata generation failed (attempt ${attempt})`,
-                error,
-              );
-
-              if (attempt === 1 && canAutoRename) {
-                fallbackName = fallbackThreadName(message.content);
-                if (fallbackName) {
-                  await thread.setName(fallbackName).then(() => {
-                    threadInfo.autoRenamedByFirstMessage = true;
-                  }).catch((error) =>
-                    console.error(
-                      "[ThreadRename] fallback rename failed",
-                      error,
-                    )
-                  );
-                }
-              }
-            },
-          );
-
-          if (names.isOk()) {
-            if (
-              canAutoRename &&
-              (DEFAULT_THREAD_NAME_PATTERN.test(thread.name) ||
-                thread.name === fallbackName)
-            ) {
-              await thread.setName(names.value.threadName).catch((error) =>
-                console.error("[ThreadRename] Discord rename failed", error)
-              );
-            }
-            const branch = await renameInitialBranch(
-              workerState.worktreePath,
-              workerState.workerName,
-              names.value.branchName,
-              threadId,
-            );
-            if (branch.isErr()) {
-              console.error("[ThreadRename] Git rename failed", branch.error);
-            }
-            threadInfo.autoRenamedByFirstMessage = true;
-          }
-          await workspaceManager.saveThreadInfo(threadInfo);
-        }
-      } catch (error) {
-        console.error("[ThreadRename] post-response rename failed", error);
-      }
-    }
-
-    if (workerResult.value.shouldAutoPush()) {
-      const workerState = await workspaceManager.loadWorkerState(threadId);
-      if (workerState?.worktreePath) {
-        const pushed = await commitAndPushWorktreeBranch(
-          workerState.worktreePath,
-          () => workerResult.value.generateCommitMessage(message.content),
-        );
-        if (pushed.isErr()) {
-          console.error("[AutoPush] commit or push failed", pushed.error);
-          const operation = pushed.error.type === "COMMAND_EXECUTION_FAILED" &&
-              pushed.error.command === "git push --set-upstream origin HEAD"
-            ? "自動プッシュ"
-            : "自動コミット";
-          const detail = pushed.error.type === "COMMAND_EXECUTION_FAILED"
-            ? pushed.error.error
-            : pushed.error.type;
-          for (
-            const chunk of chunkDiscordContent(
-              `${operation}に失敗しました。作業内容はローカルに残っています。\n${
-                formatErrorDetail(detail)
-              }`,
-            )
-          ) {
-            await sendThreadMessage(thread, chunk);
-          }
-        } else {
-          const lines: string[] = [];
-          if (pushed.value.commitMessage) {
-            lines.push(`自動コミット完了: ${pushed.value.commitMessage}`);
-          }
-          if (pushed.value.branch) {
-            lines.push(`自動プッシュ完了: origin/${pushed.value.branch}`);
-          }
-          if (pushed.value.hasUncommittedChanges) {
-            lines.push(
-              "未コミットの変更が残っています。この変更は別環境では取得できません。",
-            );
-          }
-          if (lines.length > 0) {
-            for (const chunk of chunkDiscordContent(lines.join("\n"))) {
-              await sendThreadMessage(thread, chunk);
-            }
-          }
-        }
+    if (result.value !== null) {
+      const content = typeof result.value === "string"
+        ? result.value
+        : result.value.content;
+      for (const chunk of chunkDiscordContent(content)) {
+        await sendThreadMessage(thread, chunk);
       }
     }
   });
