@@ -36,6 +36,7 @@ import {
 import { type CodexUpdateError, updateCodexCli } from "./codex-update.ts";
 import { MESSAGES } from "./constants.ts";
 import { getEnv } from "./env.ts";
+import { formatStartCommandErrorForUser } from "./start-command-error.ts";
 import {
   ensureRepository,
   parseRepository,
@@ -562,61 +563,79 @@ async function handleActiveThreads(interaction: ChatInputCommandInteraction) {
 }
 
 async function handleStart(interaction: ChatInputCommandInteraction) {
-  if (!interaction.channel || !("threads" in interaction.channel)) {
-    await interaction.reply("このチャンネルではスレッドを作成できません。");
-    return;
-  }
+  try {
+    if (!interaction.channel || !("threads" in interaction.channel)) {
+      await interaction.reply("このチャンネルではスレッドを作成できません。");
+      return;
+    }
 
-  const repositorySpec = interaction.options.getString("repository", true);
-  const parsed = parseRepository(repositorySpec);
-  if (parsed.isErr()) {
-    const message = parsed.error.type === "INVALID_REPOSITORY_NAME"
-      ? parsed.error.message
-      : parsed.error.type;
-    await interaction.reply(message);
-    return;
-  }
-  const repository = parsed.value;
+    const repositorySpec = interaction.options.getString("repository", true);
+    const parsed = parseRepository(repositorySpec);
+    if (parsed.isErr()) {
+      const message = parsed.error.type === "INVALID_REPOSITORY_NAME"
+        ? parsed.error.message
+        : parsed.error.type;
+      await interaction.reply(message);
+      return;
+    }
+    const repository = parsed.value;
 
-  await interaction.deferReply();
-  const ensured = await ensureRepository(repository, workspaceManager);
-  if (ensured.isErr()) {
-    await interaction.editReply(
-      `リポジトリ準備に失敗しました: ${ensured.error.type}`,
+    await interaction.deferReply();
+    const ensured = await ensureRepository(repository, workspaceManager);
+    if (ensured.isErr()) {
+      await interaction.editReply(
+        `リポジトリ準備に失敗しました: ${ensured.error.type}`,
+      );
+      return;
+    }
+
+    const thread = await interaction.channel.threads.create({
+      name: `${repository.fullName}-${Date.now()}`,
+      autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
+      reason: `${repository.fullName}の作業スレッド`,
+    });
+
+    const workerResult = await admin.createWorker(thread.id);
+    if (workerResult.isErr()) {
+      await interaction.editReply("Workerの初期化に失敗しました。");
+      return;
+    }
+
+    const setRepoResult = await workerResult.value.setRepository(
+      repository,
+      ensured.value.path,
     );
-    return;
+    if (setRepoResult.isErr()) {
+      await interaction.editReply("リポジトリ設定に失敗しました。");
+      return;
+    }
+
+    const message = ensured.value.wasUpdated
+      ? `${repository.fullName}を最新化しました。`
+      : `${repository.fullName}を新規取得しました。`;
+
+    await interaction.editReply(`${message}\nスレッド: ${thread.toString()}`);
+    await sendThreadMessage(
+      thread,
+      `こんにちは！ 準備バッチリだよ！ ${repository.fullName} について何でも聞いてね～！`,
+    );
+  } catch (error) {
+    console.error("[StartCommand] failed", error);
+    const fallbackMessage = formatStartCommandErrorForUser(error) ??
+      "start コマンドの実行中にエラーが発生しました。ログを確認してください。";
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(fallbackMessage);
+      } else {
+        await interaction.reply({
+          content: fallbackMessage,
+          ephemeral: true,
+        });
+      }
+    } catch {
+      // Discord 側の権限や接続状態で応答できない場合はログのみ残す。
+    }
   }
-
-  const thread = await interaction.channel.threads.create({
-    name: `${repository.fullName}-${Date.now()}`,
-    autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
-    reason: `${repository.fullName}の作業スレッド`,
-  });
-
-  const workerResult = await admin.createWorker(thread.id);
-  if (workerResult.isErr()) {
-    await interaction.editReply("Workerの初期化に失敗しました。");
-    return;
-  }
-
-  const setRepoResult = await workerResult.value.setRepository(
-    repository,
-    ensured.value.path,
-  );
-  if (setRepoResult.isErr()) {
-    await interaction.editReply("リポジトリ設定に失敗しました。");
-    return;
-  }
-
-  const message = ensured.value.wasUpdated
-    ? `${repository.fullName}を最新化しました。`
-    : `${repository.fullName}を新規取得しました。`;
-
-  await interaction.editReply(`${message}\nスレッド: ${thread.toString()}`);
-  await sendThreadMessage(
-    thread,
-    `こんにちは！ 準備バッチリだよ！ ${repository.fullName} について何でも聞いてね～！`,
-  );
 }
 
 client.on(Events.ThreadUpdate, (oldThread, newThread) => {
