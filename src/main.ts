@@ -37,6 +37,10 @@ import { type CodexUpdateError, updateCodexCli } from "./codex-update.ts";
 import { MESSAGES } from "./constants.ts";
 import { getEnv } from "./env.ts";
 import {
+  parseOutputAttachments,
+  sendOutputAttachments,
+} from "./output-attachments.ts";
+import {
   ensureRepository,
   parseRepository,
   renameInitialBranch,
@@ -741,7 +745,10 @@ client.on(Events.MessageCreate, (message) => {
     }
 
     const reply = result.value;
-    const replyContent = typeof reply === "string" ? reply : reply.content;
+    const output = parseOutputAttachments(
+      typeof reply === "string" ? reply : reply.content,
+    );
+    const replyContent = output.content.trim();
     const endStatusResult = await getAndApplyCodexStatus(Deno.cwd());
     const endStatus = endStatusResult.isOk() ? endStatusResult.value : null;
     const finalReply = replyContent.trim() === MESSAGES.NO_FINAL_RESPONSE &&
@@ -763,10 +770,43 @@ client.on(Events.MessageCreate, (message) => {
       ? `${finalReply}\n${statusUnavailableNote}`
       : finalReply;
     const chunks = chunkDiscordContent(replyWithStatus);
-    if (chunks.length === 0) return;
-    await replyToThreadMessage(message, chunks[0]);
+    if (chunks.length > 0) {
+      await replyToThreadMessage(message, chunks[0]);
+    }
     for (const chunk of chunks.slice(1)) {
       await sendThreadMessage(thread, chunk);
+    }
+
+    if (output.paths.length > 0) {
+      const workerState = await workspaceManager.loadWorkerState(threadId)
+        .catch(
+          (error) => {
+            console.error(
+              "[OutputAttachments] worker state lookup failed",
+              error,
+            );
+            return null;
+          },
+        );
+      const failures = await sendOutputAttachments(
+        output.paths,
+        workerState?.worktreePath,
+        (file) => sendThreadMessage(thread, { files: [file] }),
+      );
+      for (const failure of failures) {
+        console.error("[OutputAttachments]", failure);
+        for (const chunk of chunkDiscordContent(failure)) {
+          await sendThreadMessage(thread, {
+            content: chunk,
+            allowedMentions: { parse: [] },
+          }).catch((error) =>
+            console.error(
+              "[OutputAttachments] failure notification failed",
+              error,
+            )
+          );
+        }
+      }
     }
 
     if (isFirstUserMessage && message.content.trim()) {

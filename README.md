@@ -14,6 +14,7 @@ CLI へ渡します。Codex の途中出力と最終応答は Discord
 - スレッドごとに独立した作業ディレクトリと Codex セッションを管理
 - 通常メッセージと画像添付を Codex CLI に転送
 - Codex の JSON ストリームを Discord 向けに整形して返信
+- Codex が成果物として指定した画像・PDF・ZIPなどのファイルを Discord に添付
 - 実行中 Codex の中断、プランモード、スレッドのクローズ
 - Bot 再起動後のアクティブスレッド復旧
 
@@ -87,6 +88,7 @@ gh auth login
    - View Channels
    - Send Messages
    - Send Messages in Threads
+   - Attach Files
    - Create Public Threads
    - Read Message History
    - Add Reactions
@@ -154,6 +156,12 @@ Codex CLI に渡し、進捗と応答を同じスレッドへ返します。
 
 画像添付がある場合、Bot は添付ファイルを `WORK_BASE_DIR/attachments/`
 に保存し、対応する画像パスを Codex CLI の `--image` として渡します。
+
+Codexが成果物として指定したファイルは、応答本文の後に同じスレッドへ添付します。
+画像に限らず、PDFやZIPなども受け取れます。複数ファイルは1件ずつ送信します。
+添付元はそのスレッドの作業コピー内に限定し、通常のソースコード参照リンクは添付対象にしません。
+容量超過、ファイル不存在、添付権限不足などで添付できなかった場合も、本文と送れるファイルを返し、
+失敗したファイル名と理由を通知します。
 
 ### 3. 継続して会話する
 
@@ -226,6 +234,26 @@ effort、profile などの Codex CLI 設定は、Bot を起動するユーザー
 専用の実行ユーザーと作業ディレクトリを用意することを推奨します。
 
 ## 開発
+
+### 成果物添付の指定
+
+Botは各依頼に、成果物を最終回答の独立した行で指定する指示を追加します。
+
+```text
+[[attachment:reports/result.pdf]]
+[[attachment:output/archive.zip]]
+```
+
+パスは作業コピーからの相対パスで指定します。作業コピー外で生成したファイルは、
+Codexに作業コピーへコピーさせてから指定します。コードブロック内の指定は例示として扱い、
+添付しません。添付指定行は進捗と最終返信の本文から除き、ファイルの送信は最終返信時だけ行います。
+同じ実ファイルを複数指定した場合は、1回だけ送信します。
+
+Discordの[Create Messageの容量制限](https://docs.discord.com/developers/resources/message#create-message)
+に基づき、25 MiB以上のファイルは読み込む前に拒否します。それより小さくても、
+Discord側のファイル容量制限などで拒否される場合は、添付失敗として通知します。
+
+### 開発コマンド
 
 よく使うコマンド:
 

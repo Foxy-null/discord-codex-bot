@@ -6,6 +6,10 @@ import {
 } from "../attachments.ts";
 import { GitRepository } from "../git-utils.ts";
 import { MESSAGES, PROCESS } from "../constants.ts";
+import {
+  OUTPUT_ATTACHMENT_INSTRUCTIONS,
+  parseOutputAttachments,
+} from "../output-attachments.ts";
 import { splitIntoDiscordChunks } from "../utils/discord-message.ts";
 import { WorkerState, WorkspaceManager } from "../workspace/workspace.ts";
 import {
@@ -139,7 +143,9 @@ export class Worker implements IWorker {
         }
 
         if (parsed.text) {
-          const formatted = this.formatter.formatResponse(parsed.text);
+          const formatted = parseOutputAttachments(
+            this.formatter.formatResponse(parsed.text),
+          ).content;
           for (const chunkText of splitIntoDiscordChunks(formatted)) {
             if (!chunkText.trim()) continue;
             void this.reportProgress(onProgress, chunkText);
@@ -297,7 +303,7 @@ export class Worker implements IWorker {
     outputLastMessagePath?: string | null,
   ): string[] {
     const promptWithAttachments = formatPromptWithAttachments(
-      prompt,
+      [OUTPUT_ATTACHMENT_INSTRUCTIONS, "", prompt].join("\n"),
       attachments,
     );
     const imagePaths = getCodexImagePaths(attachments);

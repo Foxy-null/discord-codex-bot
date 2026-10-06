@@ -3,6 +3,7 @@ import { dirname, fromFileUrl } from "std/path/mod.ts";
 import { ok } from "neverthrow";
 import type { CodexCommandExecutor } from "../src/worker/codex-executor.ts";
 import { Worker } from "../src/worker/worker.ts";
+import { OUTPUT_ATTACHMENT_INSTRUCTIONS } from "../src/output-attachments.ts";
 import {
   type WorkerState,
   WorkspaceManager,
@@ -46,7 +47,7 @@ class FakeCodexExecutor implements CodexCommandExecutor {
   }
 }
 
-Deno.test("Worker: 最終応答候補のagent_messageも進捗として送信する", async () => {
+Deno.test("Worker: 最終応答候補も進捗として送信し、添付指定は最終回答にだけ保持する", async () => {
   const baseDir = await createTestDir("worker_test_");
   const worktreePath = await createTestDir("worker_worktree_");
   try {
@@ -84,7 +85,7 @@ Deno.test("Worker: 最終応答候補のagent_messageも進捗として送信す
         item: {
           id: "item_1",
           type: "agent_message",
-          text: "最終返信です。",
+          text: "最終返信です。\n[[attachment:reports/result.pdf]]",
         },
       }),
       JSON.stringify({
@@ -105,9 +106,23 @@ Deno.test("Worker: 最終応答候補のagent_messageも進捗として送信す
     );
 
     assertEquals(result.isOk(), true);
-    assertEquals(result._unsafeUnwrap(), "最終返信です。");
+    assertEquals(
+      result._unsafeUnwrap(),
+      "最終返信です。\n[[attachment:reports/result.pdf]]",
+    );
     assertEquals(progress.includes("途中ログです。"), true);
-    assertEquals(progress.includes("最終返信です。"), true);
+    assertEquals(
+      progress.some((text) => text.trim() === "最終返信です。"),
+      true,
+    );
+    assertEquals(
+      progress.some((text) => text.includes("[[attachment:")),
+      false,
+    );
+    assertEquals(
+      executor.executedArgs[0].at(-1)?.includes(OUTPUT_ATTACHMENT_INSTRUCTIONS),
+      true,
+    );
   } finally {
     await Deno.remove(baseDir, { recursive: true });
     await Deno.remove(worktreePath, { recursive: true });
