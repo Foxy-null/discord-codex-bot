@@ -212,6 +212,130 @@ export async function renameInitialBranch(
   return ok(branchName);
 }
 
+export interface CommitAndPushWorktreeResult {
+  branch: string | null;
+  commitMessage: string | null;
+  hasUncommittedChanges: boolean;
+}
+
+export async function commitAndPushWorktreeBranch(
+  worktreePath: string,
+  generateCommitMessage: () => Promise<Result<string, string>>,
+): Promise<Result<CommitAndPushWorktreeResult, GitUtilsError>> {
+  let command = "git symbolic-ref HEAD";
+  try {
+    const current = await runGit(worktreePath, [
+      "symbolic-ref",
+      "--quiet",
+      "--short",
+      "HEAD",
+    ]);
+    if (current.code !== 0) {
+      throw new Error(current.stderr || "作業ブランチを取得できませんでした。");
+    }
+    const branch = current.stdout;
+
+    command = "git symbolic-ref refs/remotes/origin/HEAD";
+    const defaultRef = await runGit(worktreePath, [
+      "symbolic-ref",
+      "--quiet",
+      "refs/remotes/origin/HEAD",
+    ]);
+    if (defaultRef.code !== 0) {
+      throw new Error(
+        defaultRef.stderr || "originの既定ブランチを取得できませんでした。",
+      );
+    }
+    if (
+      branch === "main" || branch === "master" ||
+      defaultRef.stdout === `refs/remotes/origin/${branch}`
+    ) {
+      throw new Error(
+        `既定ブランチでは自動コミット・プッシュを行いません: ${branch}`,
+      );
+    }
+
+    command = "git status --porcelain --untracked-files=all";
+    const status = await runGit(worktreePath, [
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+    ]);
+    if (status.code !== 0) throw new Error(status.stderr);
+    let hasUncommittedChanges = status.stdout.length > 0;
+    let commitMessage: string | null = null;
+    if (hasUncommittedChanges) {
+      command = "git diff --name-only --diff-filter=U";
+      const unmerged = await runGit(worktreePath, [
+        "diff",
+        "--name-only",
+        "--diff-filter=U",
+      ]);
+      if (unmerged.code !== 0) throw new Error(unmerged.stderr);
+      if (unmerged.stdout) throw new Error("未解決の競合があります。");
+
+      command = "git add --all";
+      const staged = await runGit(worktreePath, ["add", "--all"]);
+      if (staged.code !== 0) throw new Error(staged.stderr);
+
+      command = "git diff --cached --quiet";
+      const diff = await runGit(worktreePath, ["diff", "--cached", "--quiet"]);
+      if (diff.code !== 0 && diff.code !== 1) throw new Error(diff.stderr);
+      if (diff.code === 1) {
+        command = "generate commit message";
+        const generated = await generateCommitMessage();
+        if (generated.isErr()) throw new Error(generated.error);
+        const message = generated.value.trim();
+        if (!message) throw new Error("コミットメッセージが空です。");
+
+        command = "git commit";
+        const committed = await runGit(worktreePath, ["commit", "-m", message]);
+        if (committed.code !== 0) {
+          throw new Error(committed.stderr || committed.stdout);
+        }
+        commitMessage = message;
+      }
+
+      command = "git status --porcelain --untracked-files=all";
+      const remaining = await runGit(worktreePath, [
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+      ]);
+      if (remaining.code !== 0) throw new Error(remaining.stderr);
+      hasUncommittedChanges = remaining.stdout.length > 0;
+    }
+
+    command = "git rev-list --count origin/HEAD..HEAD";
+    const ahead = await runGit(worktreePath, [
+      "rev-list",
+      "--count",
+      `${defaultRef.stdout}..HEAD`,
+      "--",
+    ]);
+    if (ahead.code !== 0) throw new Error(ahead.stderr);
+    if (ahead.stdout === "0") {
+      return ok({ branch: null, commitMessage, hasUncommittedChanges });
+    }
+
+    command = "git push --set-upstream origin HEAD";
+    const pushed = await runGit(worktreePath, [
+      "push",
+      "--set-upstream",
+      "origin",
+      `HEAD:refs/heads/${branch}`,
+    ]);
+    if (pushed.code !== 0) throw new Error(pushed.stderr);
+    return ok({ branch, commitMessage, hasUncommittedChanges });
+  } catch (error) {
+    return err({
+      type: "COMMAND_EXECUTION_FAILED",
+      command,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export async function createWorktreeCopy(
   repositoryPath: string,
   workerName: string,

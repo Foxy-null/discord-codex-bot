@@ -37,6 +37,7 @@ import { type CodexUpdateError, updateCodexCli } from "./codex-update.ts";
 import { MESSAGES } from "./constants.ts";
 import { getEnv } from "./env.ts";
 import {
+  commitAndPushWorktreeBranch,
   ensureRepository,
   parseRepository,
   renameInitialBranch,
@@ -242,6 +243,13 @@ const commands = [
         .setDescription("対象のGitHubリポジトリ（例: owner/repo）")
         .setRequired(true)
         .setAutocomplete(true)
+    )
+    .addBooleanOption((option) =>
+      option.setName("auto_push")
+        .setDescription(
+          "正常終了後に全変更を自動コミット・プッシュします（既定: true）",
+        )
+        .setRequired(false)
     )
     .toJSON(),
   new SlashCommandBuilder()
@@ -568,6 +576,7 @@ async function handleStart(interaction: ChatInputCommandInteraction) {
   }
 
   const repositorySpec = interaction.options.getString("repository", true);
+  const autoPush = interaction.options.getBoolean("auto_push") ?? true;
   const parsed = parseRepository(repositorySpec);
   if (parsed.isErr()) {
     const message = parsed.error.type === "INVALID_REPOSITORY_NAME"
@@ -593,7 +602,7 @@ async function handleStart(interaction: ChatInputCommandInteraction) {
     reason: `${repository.fullName}の作業スレッド`,
   });
 
-  const workerResult = await admin.createWorker(thread.id);
+  const workerResult = await admin.createWorker(thread.id, autoPush);
   if (workerResult.isErr()) {
     await interaction.editReply("Workerの初期化に失敗しました。");
     return;
@@ -612,7 +621,11 @@ async function handleStart(interaction: ChatInputCommandInteraction) {
     ? `${repository.fullName}を最新化しました。`
     : `${repository.fullName}を新規取得しました。`;
 
-  await interaction.editReply(`${message}\nスレッド: ${thread.toString()}`);
+  await interaction.editReply(
+    `${message}\nスレッド: ${thread.toString()}\n自動コミット・プッシュ: ${
+      autoPush ? "有効" : "無効"
+    }`,
+  );
   await sendThreadMessage(
     thread,
     `こんにちは！ 準備バッチリだよ！ ${repository.fullName} について何でも聞いてね～！`,
@@ -830,6 +843,53 @@ client.on(Events.MessageCreate, (message) => {
         }
       } catch (error) {
         console.error("[ThreadRename] post-response rename failed", error);
+      }
+    }
+
+    if (workerResult.value.shouldAutoPush()) {
+      const workerState = await workspaceManager.loadWorkerState(threadId);
+      if (workerState?.worktreePath) {
+        const pushed = await commitAndPushWorktreeBranch(
+          workerState.worktreePath,
+          () => workerResult.value.generateCommitMessage(message.content),
+        );
+        if (pushed.isErr()) {
+          console.error("[AutoPush] commit or push failed", pushed.error);
+          const operation = pushed.error.type === "COMMAND_EXECUTION_FAILED" &&
+              pushed.error.command === "git push --set-upstream origin HEAD"
+            ? "自動プッシュ"
+            : "自動コミット";
+          const detail = pushed.error.type === "COMMAND_EXECUTION_FAILED"
+            ? pushed.error.error
+            : pushed.error.type;
+          for (
+            const chunk of chunkDiscordContent(
+              `${operation}に失敗しました。作業内容はローカルに残っています。\n${
+                formatErrorDetail(detail)
+              }`,
+            )
+          ) {
+            await sendThreadMessage(thread, chunk);
+          }
+        } else {
+          const lines: string[] = [];
+          if (pushed.value.commitMessage) {
+            lines.push(`自動コミット完了: ${pushed.value.commitMessage}`);
+          }
+          if (pushed.value.branch) {
+            lines.push(`自動プッシュ完了: origin/${pushed.value.branch}`);
+          }
+          if (pushed.value.hasUncommittedChanges) {
+            lines.push(
+              "未コミットの変更が残っています。この変更は別環境では取得できません。",
+            );
+          }
+          if (lines.length > 0) {
+            for (const chunk of chunkDiscordContent(lines.join("\n"))) {
+              await sendThreadMessage(thread, chunk);
+            }
+          }
+        }
       }
     }
   });
