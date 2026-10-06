@@ -67,8 +67,14 @@ export class Admin implements IAdmin {
     return ok(undefined);
   }
 
-  async createWorker(threadId: string): Promise<Result<IWorker, AdminError>> {
-    const result = await this.workerManager.createWorker(threadId);
+  async createWorker(
+    threadId: string,
+    commitPrLanguage?: string | null,
+  ): Promise<Result<IWorker, AdminError>> {
+    const result = await this.workerManager.createWorker(
+      threadId,
+      commitPrLanguage,
+    );
     if (result.isErr()) {
       const reason = result.error.type === "WORKER_CREATE_FAILED"
         ? result.error.reason
