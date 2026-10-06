@@ -4,33 +4,38 @@ import {
   getCodexImagePaths,
   type SavedAttachment,
 } from "../attachments.ts";
-import { GitRepository } from "../git-utils.ts";
-import { MESSAGES, PROCESS } from "../constants.ts";
+import type { GitRepository } from "../git-utils.ts";
+import { MESSAGES } from "../constants.ts";
 import { splitIntoDiscordChunks } from "../utils/discord-message.ts";
-import { WorkerState, WorkspaceManager } from "../workspace/workspace.ts";
+import { type WorkerState, WorkspaceManager } from "../workspace/workspace.ts";
 import {
-  type CodexCommandExecutor,
-  DefaultCodexCommandExecutor,
+  asRecord,
+  type CodexClient,
+  CodexRpcError,
+  DefaultCodexClient,
 } from "./codex-executor.ts";
-import {
-  CodexStreamProcessor,
-  extractRateLimitTimestamp,
-} from "./codex-stream-processor.ts";
+import { extractRateLimitTimestamp } from "./codex-stream-processor.ts";
 import { MessageFormatter } from "./message-formatter.ts";
 import { SessionLogger } from "./session-logger.ts";
 import { WorkerConfiguration } from "./worker-configuration.ts";
-import type { IWorker, WorkerError } from "./types.ts";
+import type { IWorker, MessageAttachments, WorkerError } from "./types.ts";
 
 const DIAGNOSTIC_SECTION_LIMIT = 1800;
-const DIAGNOSTIC_TEXT_LIMIT = 5000;
 
-interface CodexFailureDetailOptions {
-  exitCode?: number;
-  reason?: string;
-  stderr?: string;
-  rawOutput: string;
-  outputLastMessagePath?: string | null;
-  sessionLogPath?: string | null;
+interface RunningTurn {
+  threadId: string;
+  id: string | null;
+  done: PromiseWithResolvers<Record<string, unknown>>;
+  finalMessages: Map<string, string>;
+  raw: string;
+  onProgress: (content: string) => Promise<void>;
+  progress: Promise<void>;
+}
+interface ActiveMessage {
+  phase: "starting" | "running" | "stopping" | "finalizing";
+  finished: PromiseWithResolvers<void>;
+  ready: PromiseWithResolvers<RunningTurn | null>;
+  turn: RunningTurn | null;
 }
 
 function redactSensitiveText(text: string): string {
@@ -65,219 +70,331 @@ function formatUnknownError(error: unknown): string {
 export class Worker implements IWorker {
   private readonly configuration: WorkerConfiguration;
   private readonly sessionLogger: SessionLogger;
-  private readonly streamProcessor: CodexStreamProcessor;
   private readonly formatter = new MessageFormatter();
-
-  private codexExecutor: CodexCommandExecutor;
-  private codexProcess: Deno.ChildProcess | null = null;
-  private abortController: AbortController | null = null;
-  private isExecuting = false;
+  private client: CodexClient | null;
+  private loaded = false;
+  private disposed = false;
+  private active: ActiveMessage | null = null;
+  private inputChain: Promise<void> = Promise.resolve();
+  private readonly turns = new Map<string, RunningTurn>();
 
   constructor(
     private state: WorkerState,
     private readonly workspaceManager: WorkspaceManager,
-    codexExecutor?: CodexCommandExecutor,
+    client?: CodexClient,
     appendSystemPrompt?: string,
   ) {
     this.configuration = new WorkerConfiguration(appendSystemPrompt);
-    this.codexExecutor = codexExecutor ??
-      new DefaultCodexCommandExecutor();
     this.sessionLogger = new SessionLogger(workspaceManager);
-    this.streamProcessor = new CodexStreamProcessor();
+    this.client = client ?? null;
+    if (this.client) this.attachClient(this.client);
+  }
+
+  private attachClient(client: CodexClient): void {
+    client.onNotification = (method, params) => this.receive(method, params);
+    client.onFailure = (error) => {
+      this.loaded = false;
+      for (const turn of this.turns.values()) turn.done.reject(error);
+    };
+  }
+
+  private getClient(): CodexClient {
+    if (!this.client) {
+      this.client = new DefaultCodexClient(this.state.worktreePath!);
+      this.attachClient(this.client);
+    }
+    return this.client;
+  }
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.inputChain.then(operation);
+    this.inputChain = result.then(() => {}, () => {});
+    return result;
   }
 
   async processMessage(
     message: string,
-    attachments: readonly SavedAttachment[] = [],
+    attachments: MessageAttachments = [],
     onProgress: (content: string) => Promise<void> = async () => {},
     onReaction?: (emoji: string) => Promise<void>,
-  ): Promise<Result<string, WorkerError>> {
-    if (!this.state.repository || !this.state.worktreePath) {
-      return err({ type: "REPOSITORY_NOT_SET" });
-    }
-
-    if (onReaction) {
-      await onReaction("⚙️").catch(() => {});
-    }
-
-    await this.reportProgress(
-      onProgress,
-      "🤖 Codexが処理を開始しました...",
-    );
-
-    this.isExecuting = true;
-    this.abortController = new AbortController();
-    this.codexProcess = null;
-
-    let newSessionId: string | null = null;
-    let allOutput = "";
-    let finalResult = "";
-    let pendingBuffer = "";
-    let outputLastMessagePath: string | null = null;
-    let rateLimitTimestamp: number | undefined;
-
-    const onData = (chunk: Uint8Array) => {
-      const text = new TextDecoder().decode(chunk, { stream: true });
-      allOutput += text;
-      pendingBuffer += text;
-      const lines = pendingBuffer.split("\n");
-      pendingBuffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        const parsed = this.streamProcessor.parseLine(line);
-
-        if (parsed.rateLimitTimestamp !== undefined) {
-          rateLimitTimestamp = parsed.rateLimitTimestamp;
+    onComplete?: (reply: string) => Promise<void>,
+  ): Promise<Result<string | null, WorkerError>> {
+    try {
+      // Only preparation and RPC acceptance are serialized, never the whole running turn.
+      const accepted = await this.serialize(async () => {
+        if (this.active && this.active.phase !== "running") {
+          await this.active.finished.promise;
         }
-
-        if (parsed.sessionId) {
-          newSessionId = parsed.sessionId;
+        if (this.disposed) throw new Error("このWorkerは終了しています。");
+        if (!this.state.repository || !this.state.worktreePath) {
+          return {
+            completion: Promise.resolve(
+              err<string | null, WorkerError>({ type: "REPOSITORY_NOT_SET" }),
+            ),
+          };
         }
-
-        if (parsed.finalText) {
-          finalResult = parsed.finalText;
+        let saved: readonly SavedAttachment[];
+        try {
+          saved = typeof attachments === "function"
+            ? await attachments()
+            : attachments;
+        } catch (error) {
+          return {
+            completion: Promise.resolve(
+              err<string | null, WorkerError>({
+                type: "WORKSPACE_ERROR",
+                operation: "prepareAttachments",
+                error: truncateDiagnostic(formatUnknownError(error)),
+              }),
+            ),
+          };
         }
-
-        if (parsed.text) {
-          const formatted = this.formatter.formatResponse(parsed.text);
-          for (const chunkText of splitIntoDiscordChunks(formatted)) {
-            if (!chunkText.trim()) continue;
-            void this.reportProgress(onProgress, chunkText);
+        if (this.active && this.active.phase !== "running") {
+          await this.active.finished.promise;
+        }
+        if (this.disposed) throw new Error("このWorkerは終了しています。");
+        const input = this.buildInput(message, saved);
+        const current = this.active;
+        if (current) {
+          try {
+            const accepted = await this.getClient().request("turn/steer", {
+              threadId: this.state.sessionId,
+              expectedTurnId: current.turn!.id,
+              input,
+            });
+            if (accepted.turnId !== current.turn!.id) {
+              throw new Error(
+                "追加指示の受理先ターンを確認できませんでした。入力は自動再送しません。",
+              );
+            }
+            await this.reportProgress(onProgress, "追加指示を受け付けました。");
+            return {
+              completion: Promise.resolve(ok<string | null, WorkerError>(null)),
+            };
+          } catch (error) {
+            // Retry only an explicit rejection after the original turn has ended.
+            if (
+              !(error instanceof CodexRpcError) || error.code !== -32600 ||
+              !/no active turn|does not have an active turn|active turn not found|expected active turn id .* but found|expected.*turn.*(?:mismatch|match)|turn.*(?:mismatch|does not match)/i
+                .test(error.message)
+            ) throw error;
+            await current.finished.promise;
           }
         }
-      }
-    };
-
-    try {
-      outputLastMessagePath = await this.workspaceManager.createTempFile({
-        prefix: "discord-codex-last-message-",
-        suffix: ".txt",
+        const active: ActiveMessage = {
+          phase: "starting",
+          finished: Promise.withResolvers<void>(),
+          ready: Promise.withResolvers<RunningTurn | null>(),
+          turn: null,
+        };
+        this.active = active;
+        try {
+          await onReaction?.("⚙️").catch(() => {});
+          await this.reportProgress(
+            onProgress,
+            "🤖 Codexが処理を開始しました...",
+          );
+          await this.ensureThread();
+          active.turn = await this.startTurn(
+            this.state.sessionId!,
+            input,
+            onProgress,
+          );
+          active.ready.resolve(active.turn);
+          if (active.phase === "starting") active.phase = "running";
+          return { completion: this.finishMessage(active, onComplete) };
+        } catch (error) {
+          this.release(active);
+          throw error;
+        }
       });
-
-      const args = this.buildExecutionArgs(
-        message,
-        attachments,
-        outputLastMessagePath,
-      );
-
-      const execResult = await this.codexExecutor.executeStreaming(
-        args,
-        this.state.worktreePath,
-        onData,
-        this.abortController.signal,
-        (process) => {
-          this.codexProcess = process;
-        },
-      );
-
-      if (pendingBuffer.trim()) {
-        const parsed = this.streamProcessor.parseLine(pendingBuffer.trim());
-        if (parsed.finalText) {
-          finalResult = parsed.finalText;
-        } else if (parsed.text && !finalResult) {
-          finalResult = parsed.text;
-        }
-        if (parsed.sessionId) {
-          newSessionId = parsed.sessionId;
-        }
-        if (parsed.rateLimitTimestamp !== undefined) {
-          rateLimitTimestamp = parsed.rateLimitTimestamp;
-        }
-      }
-
-      if (execResult.isErr()) {
-        if (rateLimitTimestamp !== undefined) {
-          return err({
-            type: "RATE_LIMIT",
-            timestamp: rateLimitTimestamp,
-            retryAt: rateLimitTimestamp,
-            message: "Codexのレート制限に達しました。",
-          });
-        }
-        const logPath = await this.saveRawCodexOutput(
-          allOutput,
-          newSessionId ?? this.state.sessionId,
-        );
-        return err(
-          await this.createCodexExecutionFailedError({
-            reason: execResult.error.type === "COMMAND_EXECUTION_FAILED"
-              ? execResult.error.stderr
-              : execResult.error.error,
-            rawOutput: allOutput,
-            outputLastMessagePath,
-            sessionLogPath: logPath,
-          }),
-        );
-      }
-
-      const { code, stderr } = execResult.value;
-      if (code !== 0) {
-        const stderrText = new TextDecoder().decode(stderr);
-        const ts = rateLimitTimestamp ??
-          extractRateLimitTimestamp([stderrText, allOutput].join("\n"));
-        if (ts !== undefined) {
-          return err({
-            type: "RATE_LIMIT",
-            timestamp: ts,
-            retryAt: ts,
-            message: "Codexのレート制限に達しました。",
-          });
-        }
-        const logPath = await this.saveRawCodexOutput(
-          allOutput,
-          newSessionId ?? this.state.sessionId,
-        );
-        return err(
-          await this.createCodexExecutionFailedError({
-            exitCode: code,
-            stderr: stderrText,
-            rawOutput: allOutput,
-            outputLastMessagePath,
-            sessionLogPath: logPath,
-          }),
-        );
-      }
-
-      if (newSessionId && newSessionId !== this.state.sessionId) {
-        this.state.sessionId = newSessionId;
-      }
-
-      if (!finalResult.trim()) {
-        finalResult = await this.readOutputLastMessage(outputLastMessagePath);
-      }
-
-      await this.saveRawCodexOutput(allOutput, this.state.sessionId);
-      await this.save();
-
-      return ok(
-        this.formatter.formatResponse(
-          finalResult.trim() || MESSAGES.NO_FINAL_RESPONSE,
-        ),
-      );
+      return await accepted.completion;
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        return ok("⛔ Codex実行を中断しました。");
+      return err(await this.executionError(error));
+    }
+  }
+
+  private async ensureThread(): Promise<void> {
+    if (this.loaded) return;
+    const params = this.configuration.buildThreadParams(
+      this.state.worktreePath!,
+    );
+    const response = await this.getClient().request(
+      this.state.sessionId ? "thread/resume" : "thread/start",
+      {
+        ...params,
+        ...(this.state.sessionId ? { threadId: this.state.sessionId } : {}),
+      },
+    );
+    const id = asRecord(response.thread).id;
+    if (typeof id !== "string" || !id) {
+      throw new Error("Codex会話IDを取得できませんでした。");
+    }
+    // Keep the existing disk field; its value is Codex's thread.id, not session tree root.
+    this.state.sessionId = id;
+    const saved = await this.save();
+    if (saved.isErr()) throw new Error("Codex会話IDを保存できませんでした。");
+    this.loaded = true;
+  }
+
+  private async startTurn(
+    threadId: string,
+    input: Record<string, unknown>[],
+    onProgress: (content: string) => Promise<void> = async () => {},
+  ): Promise<RunningTurn> {
+    const turn: RunningTurn = {
+      threadId,
+      id: null,
+      done: Promise.withResolvers<Record<string, unknown>>(),
+      finalMessages: new Map(),
+      raw: "",
+      onProgress,
+      progress: Promise.resolve(),
+    };
+    // Register before the request: notifications can precede the RPC response.
+    this.turns.set(threadId, turn);
+    void turn.done.promise.catch(() => {});
+    try {
+      const response = await this.getClient().request("turn/start", {
+        threadId,
+        input,
+      });
+      const id = asRecord(response.turn).id;
+      if (typeof id !== "string" || !id) {
+        throw new Error("CodexターンIDを取得できませんでした。");
       }
-      const logPath = await this.saveRawCodexOutput(
-        allOutput,
-        newSessionId ?? this.state.sessionId,
-      );
-      return err(
-        await this.createCodexExecutionFailedError({
-          reason: error instanceof Error ? error.message : String(error),
-          rawOutput: allOutput,
-          outputLastMessagePath,
-          sessionLogPath: logPath,
-        }),
-      );
-    } finally {
-      this.isExecuting = false;
-      this.abortController = null;
-      this.codexProcess = null;
-      if (outputLastMessagePath) {
-        await Deno.remove(outputLastMessagePath).catch(() => {});
+      if (turn.id && turn.id !== id) {
+        throw new Error("CodexターンIDが一致しません。");
+      }
+      turn.id = id;
+      return turn;
+    } catch (error) {
+      this.turns.delete(threadId);
+      throw error;
+    }
+  }
+
+  private receive(method: string, params: Record<string, unknown>): void {
+    if (typeof params.threadId !== "string") return;
+    const running = this.turns.get(params.threadId);
+    if (!running) return;
+    if (
+      typeof params.turnId === "string" && running.id &&
+      params.turnId !== running.id
+    ) return;
+    // ponytail: buffer one turn; stream logs to disk if output size becomes a problem.
+    running.raw += JSON.stringify({ method, params }) + "\n";
+    if (method === "turn/started" || method === "turn/completed") {
+      const turn = asRecord(params.turn);
+      if (
+        typeof turn.id !== "string" || (running.id && running.id !== turn.id)
+      ) return;
+      running.id = turn.id;
+      if (method === "turn/completed") {
+        if (
+          this.active &&
+          (running === this.active.turn ||
+            (this.active.phase === "starting" &&
+              running.threadId === this.state.sessionId))
+        ) this.active.phase = "finalizing";
+        running.done.resolve(turn);
+      }
+      return;
+    }
+    if (method !== "item/started" && method !== "item/completed") return;
+    const item = asRecord(params.item);
+    let progress = "";
+    if (item.type === "contextCompaction") {
+      progress = method === "item/started"
+        ? "コンテキスト圧縮を開始しました。"
+        : "コンテキスト圧縮が完了しました。";
+    } else if (method === "item/completed") {
+      if (item.type === "agentMessage" && typeof item.text === "string") {
+        progress = item.text;
+        if (item.phase !== "commentary" && item.delivery !== "async") {
+          if (typeof item.id !== "string" || !item.id) {
+            throw new Error("Codex応答IDを取得できませんでした。");
+          }
+          running.finalMessages.set(item.id, item.text);
+        }
+      } else if (item.type === "fileChange") {
+        progress = "ファイルの変更を反映しました。";
       }
     }
+    if (progress) {
+      const text = this.formatter.formatResponse(progress);
+      running.progress = running.progress.then(() =>
+        this.reportProgress(running.onProgress, text)
+      );
+    }
+  }
+
+  private async finishMessage(
+    active: ActiveMessage,
+    onComplete?: (reply: string) => Promise<void>,
+  ): Promise<Result<string | null, WorkerError>> {
+    const running = active.turn!;
+    try {
+      const turn = await running.done.promise;
+      active.phase = "finalizing";
+      await running.progress;
+      await this.saveRawCodexOutput(running.raw, running.threadId);
+      if (turn.status === "failed") {
+        throw new Error(
+          String(
+            asRecord(turn.error ?? {}).message ?? "Codex実行に失敗しました。",
+          ),
+        );
+      }
+      if (turn.status !== "completed" && turn.status !== "interrupted") {
+        throw new Error("Codex終了状態が不正です。");
+      }
+      const reply = turn.status === "interrupted"
+        ? "⛔ Codex実行を中断しました。"
+        : this.formatter.formatResponse(
+          [...running.finalMessages.values()].join("\n\n").trim() ||
+            MESSAGES.NO_FINAL_RESPONSE,
+        );
+      await onComplete?.(reply);
+      return ok(onComplete ? null : reply);
+    } catch (error) {
+      return err(await this.executionError(error, running));
+    } finally {
+      this.turns.delete(running.threadId);
+      this.release(active);
+    }
+  }
+
+  private release(active: ActiveMessage): void {
+    active.ready.resolve(null);
+    if (this.active === active) this.active = null;
+    active.finished.resolve();
+  }
+
+  private buildInput(
+    message: string,
+    attachments: readonly SavedAttachment[],
+  ): Record<string, unknown>[] {
+    const prompt = formatPromptWithAttachments(
+      [
+        ...(this.isPlanMode()
+          ? [
+            "You are in plan mode.",
+            "Return an implementation plan before coding.",
+            "If coding is needed, include clear ordered steps.",
+          ]
+          : []),
+        message,
+      ].join("\n\n"),
+      attachments,
+    );
+    return [
+      { type: "text", text: prompt, text_elements: [] },
+      ...getCodexImagePaths(attachments).map((path) => ({
+        type: "localImage",
+        path,
+      })),
+    ];
   }
 
   private async reportProgress(
@@ -285,55 +402,11 @@ export class Worker implements IWorker {
     content: string,
   ): Promise<void> {
     try {
-      await onProgress(content);
+      for (const chunk of splitIntoDiscordChunks(content)) {
+        if (chunk.trim()) await onProgress(chunk);
+      }
     } catch (error) {
       console.error("[Worker] progress callback failed", error);
-    }
-  }
-
-  private buildExecutionArgs(
-    prompt: string,
-    attachments: readonly SavedAttachment[] = [],
-    outputLastMessagePath?: string | null,
-  ): string[] {
-    const promptWithAttachments = formatPromptWithAttachments(
-      prompt,
-      attachments,
-    );
-    const imagePaths = getCodexImagePaths(attachments);
-
-    if (!this.isPlanMode()) {
-      return this.configuration.buildCodexArgs(
-        promptWithAttachments,
-        this.state.sessionId,
-        imagePaths,
-        outputLastMessagePath,
-      );
-    }
-
-    const planPrompt = [
-      "You are in plan mode.",
-      "Return an implementation plan before coding.",
-      "If coding is needed, include clear ordered steps.",
-      "",
-      promptWithAttachments,
-    ].join("\n");
-    return this.configuration.buildCodexArgs(
-      planPrompt,
-      this.state.sessionId,
-      imagePaths,
-      outputLastMessagePath,
-    );
-  }
-
-  private async readOutputLastMessage(path: string): Promise<string> {
-    try {
-      return await Deno.readTextFile(path);
-    } catch (error) {
-      if (error instanceof Deno.errors.NotFound) {
-        return "";
-      }
-      throw error;
     }
   }
 
@@ -356,106 +429,72 @@ export class Worker implements IWorker {
     return result.value;
   }
 
-  private async createCodexExecutionFailedError(
-    options: CodexFailureDetailOptions,
+  private async executionError(
+    error: unknown,
+    running?: RunningTurn,
   ): Promise<WorkerError> {
+    const detail = truncateDiagnostic(formatUnknownError(error));
+    const timestamp = extractRateLimitTimestamp(detail);
+    if (
+      timestamp !== undefined ||
+      /usage limit|rate limit|usage_limit_reached/i.test(detail)
+    ) {
+      return {
+        type: "RATE_LIMIT",
+        timestamp,
+        retryAt: timestamp,
+        message: detail,
+      };
+    }
+    const log = running
+      ? await this.saveRawCodexOutput(running.raw, running.threadId)
+      : null;
+    return {
+      type: "CODEX_EXECUTION_FAILED",
+      error: ["Codex実行失敗", detail, log ? `保存ログ: ${log}` : ""].filter(
+        Boolean,
+      ).join("\n"),
+    };
+  }
+
+  async stopExecution(
+    onProgress?: (content: string) => Promise<void>,
+  ): Promise<boolean> {
+    const active = this.active;
+    if (active?.phase === "starting") await active.ready.promise;
+    const running = active?.phase === "running" ? active.turn : null;
+    if (!running?.id) return false;
+    if (active) {
+      active.phase = "stopping";
+    }
     try {
-      return {
-        type: "CODEX_EXECUTION_FAILED",
-        error: await this.formatCodexFailureDetail(options),
-      };
+      await this.getClient().request("turn/interrupt", {
+        threadId: running.threadId,
+        turnId: running.id,
+      });
     } catch (error) {
-      console.error("[Worker] failed to format Codex failure detail", error);
-      return {
-        type: "CODEX_EXECUTION_FAILED",
-        error: [
-          options.exitCode === undefined
-            ? "Codex実行失敗"
-            : `Codex実行失敗 (終了コード: ${options.exitCode})`,
-          "",
-          "詳細の整形中にエラーが発生しました:",
-          truncateDiagnostic(formatUnknownError(error)),
-        ].join("\n"),
-      };
+      if (
+        !(error instanceof CodexRpcError) || error.code !== -32600 ||
+        !/no active turn|does not have an active turn|active turn not found/i
+          .test(error.message)
+      ) throw error;
     }
+    await running.done.promise;
+    if (onProgress) {
+      await this.reportProgress(onProgress, "⛔ Codex実行を中断しました。");
+    }
+    return true;
   }
 
-  private async formatCodexFailureDetail(
-    options: CodexFailureDetailOptions,
-  ): Promise<string> {
-    const lines = [
-      options.exitCode === undefined
-        ? "Codex実行失敗"
-        : `Codex実行失敗 (終了コード: ${options.exitCode})`,
-    ];
-
-    if (options.reason?.trim()) {
-      lines.push("", "理由:", truncateDiagnostic(options.reason));
+  async close(): Promise<void> {
+    this.disposed = true;
+    try {
+      await this.stopExecution();
+      if (this.active) await this.active.finished.promise;
+      await this.inputChain;
+    } finally {
+      await this.client?.close();
     }
-
-    if (options.stderr?.trim()) {
-      lines.push("", "stderr:", truncateDiagnostic(options.stderr));
-    }
-
-    const lastMessage = options.outputLastMessagePath
-      ? await this.readOutputLastMessage(options.outputLastMessagePath)
-      : "";
-    if (lastMessage.trim()) {
-      lines.push("", "Codex最終メッセージ:", truncateDiagnostic(lastMessage));
-    }
-
-    const diagnostic = this.extractOutputDiagnostics(options.rawOutput);
-    if (diagnostic) {
-      lines.push("", "Codex出力の手がかり:", diagnostic);
-    }
-
-    if (options.sessionLogPath) {
-      lines.push("", `保存ログ: ${options.sessionLogPath}`);
-    }
-
-    const detail = lines.join("\n").trim();
-    return detail.length <= DIAGNOSTIC_TEXT_LIMIT
-      ? detail
-      : `${
-        detail.slice(0, DIAGNOSTIC_TEXT_LIMIT)
-      }\n...詳細が長すぎるため省略しました`;
-  }
-
-  private extractOutputDiagnostics(rawOutput: string): string {
-    const snippets: string[] = [];
-    for (const line of rawOutput.split("\n")) {
-      if (!line.trim()) continue;
-      const parsed = this.streamProcessor.parseLine(line);
-      const errorText = parsed.json
-        ? this.extractJsonErrorText(parsed.json)
-        : "";
-      const text = [errorText, parsed.finalText, parsed.text]
-        .filter((item) => item && item.trim())
-        .join("\n");
-      if (text.trim()) snippets.push(text.trim());
-    }
-
-    const unique = [...new Set(snippets)].slice(-6);
-    if (unique.length === 0) return "";
-    return truncateDiagnostic(unique.join("\n---\n"));
-  }
-
-  private extractJsonErrorText(json: Record<string, unknown>): string {
-    const error = json.error;
-    if (typeof error === "string") return error;
-    if (error && typeof error === "object") {
-      const obj = error as Record<string, unknown>;
-      return [obj.message, obj.code, obj.type]
-        .filter((item) => typeof item === "string" && item)
-        .join("\n");
-    }
-
-    const type = typeof json.type === "string" ? json.type : "";
-    const message = json.message;
-    if (type.toLowerCase().includes("error") && typeof message === "string") {
-      return message;
-    }
-    return "";
   }
 
   getName(): string {
@@ -475,6 +514,16 @@ export class Worker implements IWorker {
     repository: GitRepository,
     localPath: string,
   ): Promise<Result<void, WorkerError>> {
+    if (this.active) {
+      return err({
+        type: "WORKSPACE_ERROR",
+        operation: "setRepository",
+        error: "作業の完了後に変更してください。",
+      });
+    }
+    await this.client?.close();
+    this.client = null;
+    this.loaded = false;
     this.state.repository = {
       fullName: repository.fullName,
       org: repository.org,
@@ -512,40 +561,6 @@ export class Worker implements IWorker {
     }
   }
 
-  async stopExecution(
-    onProgress?: (content: string) => Promise<void>,
-  ): Promise<boolean> {
-    if (!this.isExecuting || !this.codexProcess) {
-      return false;
-    }
-
-    try {
-      this.abortController?.abort();
-      this.codexProcess.kill("SIGTERM");
-
-      const process = this.codexProcess;
-      const timer = setTimeout(() => {
-        try {
-          process.kill("SIGKILL");
-        } catch {
-          // ignore
-        }
-      }, PROCESS.TERMINATION_TIMEOUT_MS);
-
-      await process.status.catch(() => {});
-      clearTimeout(timer);
-
-      if (onProgress) {
-        await onProgress("⛔ Codex実行を中断しました。");
-      }
-      return true;
-    } finally {
-      this.isExecuting = false;
-      this.codexProcess = null;
-      this.abortController = null;
-    }
-  }
-
   isPlanMode(): boolean {
     return this.state.isPlanMode ?? false;
   }
@@ -558,11 +573,12 @@ export class Worker implements IWorker {
     workerState: WorkerState,
     workspaceManager: WorkspaceManager,
     appendSystemPrompt?: string,
+    client?: CodexClient,
   ): Promise<Worker> {
     return new Worker(
       workerState,
       workspaceManager,
-      undefined,
+      client,
       appendSystemPrompt,
     );
   }

@@ -16,6 +16,7 @@ function createRouter(error: WorkerError): MessageRouter {
       throw new Error("not implemented");
     },
     stopExecution: () => Promise.resolve(false),
+    close: () => Promise.resolve(),
     isPlanMode: () => false,
     setPlanMode: () => {},
   };
@@ -39,6 +40,7 @@ function createRejectingRouter(error: unknown): MessageRouter {
       throw new Error("not implemented");
     },
     stopExecution: () => Promise.resolve(false),
+    close: () => Promise.resolve(),
     isPlanMode: () => false,
     setPlanMode: () => {},
   };

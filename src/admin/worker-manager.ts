@@ -73,6 +73,18 @@ export class WorkerManager {
     return worker;
   }
 
+  async closeAll(): Promise<void> {
+    const results = await Promise.allSettled(
+      [...this.workers.values()].map((worker) => worker.close()),
+    );
+    const errors = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : []
+    );
+    if (errors.length) {
+      throw new AggregateError(errors, "Workerの終了処理に失敗しました。");
+    }
+  }
+
   getWorkerCount(): number {
     return this.workers.size;
   }

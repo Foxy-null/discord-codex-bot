@@ -153,7 +153,7 @@ Codex CLI に渡し、進捗と応答を同じスレッドへ返します。
 自動更新します。
 
 画像添付がある場合、Bot は添付ファイルを `WORK_BASE_DIR/attachments/`
-に保存し、対応する画像パスを Codex CLI の `--image` として渡します。
+に保存し、対応する画像パスをCodexの画像入力として渡します。
 
 ### 3. 継続して会話する
 
@@ -197,6 +197,27 @@ WORK_BASE_DIR/
 このディレクトリは Bot が直接読み書きします。複数環境で同じ `WORK_BASE_DIR`
 を共有しないでください。
 
+### 実行中の追加入力
+
+実行中の投稿は`turn/steer`で現在の作業へ渡し、受理を通知します。
+最終返信は作業完了時に一度だけ送り、Steer前後の回答を生成順に保持します。
+入力添付の準備は受信順に行い、最終返信の処理中に届いた入力は次の作業へ渡します。
+接続障害などで受理結果が不明な入力は自動再送しません。
+
+DiscordにはCodexの進捗説明と回答を返します。コマンドの生出力と内部の思考要約は
+送信せず、成功・失敗にかかわらず`WORK_BASE_DIR/sessions/`のログへ保存します。
+
+各Workerは`codex app-server --listen stdio://`への接続を維持します。
+会話の開始・復旧は`thread/start`・`thread/resume`、作業開始は`turn/start`、
+停止は`turn/interrupt`を使います。検索、追加システム指示、画像入力を引き継ぎ、
+承認不要・sandbox制限なしで実行します。対話要求にはエラーを返します。
+`/close`・Bot停止時には子プロセスを終了します。
+
+既存の作業コピー・会話ID・プラン設定は再起動後も使えます。復元失敗時は会話IDを保持し、
+新規会話で置き換えません。更新時は実行を完了させて旧Botと子プロセスを停止し、
+同じ`WORK_BASE_DIR`、`CODEX_HOME`、実行ユーザーで起動してください。 Codex
+CLIの更新後もBotの再起動が必要です。
+
 ## Codex CLI の実行形式
 
 Bot は概ね次の形式で Codex CLI を実行します。
@@ -204,18 +225,8 @@ Bot は概ね次の形式で Codex CLI を実行します。
 新規セッション:
 
 ```text
-codex --search exec --json --color never --dangerously-bypass-approvals-and-sandbox --output-last-message <path> "<prompt>"
+codex app-server --listen stdio://
 ```
-
-継続セッション:
-
-```text
-codex --search exec --json --color never --dangerously-bypass-approvals-and-sandbox resume --output-last-message <path> <session_id> "<prompt>"
-```
-
-画像添付がある場合は `--image <path>`
-が追加されます。`CODEX_APPEND_SYSTEM_PROMPT` を設定している場合は
-`--append-system-prompt` も追加されます。
 
 Bot は `--model` や `model_reasoning_effort` を指定しません。モデル、reasoning
 effort、profile などの Codex CLI 設定は、Bot を起動するユーザーの Codex CLI

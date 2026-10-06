@@ -74,7 +74,7 @@ export function formatCodexUpdateResult(result: CodexUpdateResult): string {
   return [
     title,
     outputBlock,
-    "BOT は Codex を実行ごとに起動するため、再起動などは必要ないよ。",
+    "更新を反映するには、実行の完了後にBOTを再起動してください。",
   ].filter(Boolean).join("\n\n");
 }
 
