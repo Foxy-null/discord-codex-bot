@@ -507,7 +507,7 @@ Deno.test("Worker: 初回失敗・中断でも会話IDを保存し、復元失�
   }
 });
 
-Deno.test("Worker: 生出力と思考要約を隠し、添付・途中出力・進捗エラーを処理する", async () => {
+Deno.test("Worker: 生出力・思考要約・ファイル変更通知を隠し、応答とログを処理する", async () => {
   const env = await setup();
   env.client.autoComplete = false;
   const progress: string[] = [];
@@ -526,6 +526,7 @@ Deno.test("Worker: 生出力と思考要約を隠し、添付・途中出力・�
     },
     { type: "commandExecution", command: "rg TODO" },
     { type: "reasoning", summary: ["内部の思考要約"] },
+    { type: "fileChange" },
   ];
   try {
     const request = env.worker.processMessage("画像を見て", [{
@@ -561,10 +562,6 @@ Deno.test("Worker: 生出力と思考要約を隠し、添付・途中出力・�
     }
     env.client.onNotification("item/completed", {
       threadId: "thread-1",
-      item: { type: "fileChange" },
-    });
-    env.client.onNotification("item/completed", {
-      threadId: "thread-1",
       item: {
         id: "answer",
         type: "agentMessage",
@@ -585,7 +582,6 @@ Deno.test("Worker: 生出力と思考要約を隠し、添付・途中出力・�
       "🤖 Codexが処理を開始しました...",
       "コンテキスト圧縮を開始しました。",
       "コンテキスト圧縮が完了しました。",
-      "ファイルの変更を反映しました。",
       "回答\n",
       "途中出力",
     ]);
