@@ -330,8 +330,6 @@ export class Worker implements IWorker {
           }
           running.finalMessages.set(item.id, item.text);
         }
-      } else if (item.type === "fileChange") {
-        progress = "ファイルの変更を反映しました。";
       }
     }
     if (progress) {
