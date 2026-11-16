@@ -270,7 +270,13 @@ const commands = [
     .toJSON(),
   new SlashCommandBuilder()
     .setName("plan")
-    .setDescription("プランモードを有効にします")
+    .setDescription("次に始まる作業のプランモードを設定します")
+    .addBooleanOption((option) =>
+      option.setName("enabled")
+        .setDescription(
+          "有効なら調査と計画で止めます。falseで解除します（既定: true）",
+        )
+    )
     .toJSON(),
   new SlashCommandBuilder()
     .setName("status")
@@ -373,12 +379,17 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
       return;
     }
     await interaction.deferReply();
-    const result = await admin.setPlanMode(interaction.channel.id, true);
+    const enabled = interaction.options.getBoolean("enabled") ?? true;
+    const result = await admin.setPlanMode(interaction.channel.id, enabled);
     if (result.isErr()) {
       await interaction.editReply("プランモード設定に失敗しました。");
       return;
     }
-    await interaction.editReply("✅ プランモードを有効化しました。");
+    await interaction.editReply(
+      `✅ プランモードを${
+        enabled ? "有効" : "無効"
+      }にしました。次に始まる作業から適用します。`,
+    );
     return;
   }
 

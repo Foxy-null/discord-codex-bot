@@ -137,10 +137,12 @@ Deno.test("Admin: コミット・PR言語は保存・復旧し新規・継続・
         const prompt = input[0].text;
         assertExists(prompt);
         assertStringIncludes(prompt, request);
-        const instructions = calls.find((call) =>
-          call.method === "thread/start"
-        )
-          .params.developerInstructions;
+        const injections = calls.filter((call) =>
+          call.method === "thread/inject_items"
+        );
+        const item = injections[0].params.items[0];
+        assertEquals(item.role, "developer");
+        const instructions = item.content[0].text;
         assertStringIncludes(
           instructions,
           "commit messages and pull request titles and descriptions",
@@ -165,18 +167,24 @@ Deno.test("Admin: コミット・PR言語は保存・復旧し新規・継続・
         assertStringIncludes(instructions, OUTPUT_ATTACHMENT_INSTRUCTIONS);
         assertStringIncludes(instructions, "追加指示");
         assertEquals(instructions.includes(request), false);
-        assertEquals(instructions.includes("You are in plan mode."), false);
+        assertEquals(
+          injections.at(-1).params.items[0].content[0].text.includes(
+            "You are in plan mode.",
+          ),
+          turn === 2,
+        );
+        assertEquals(injections.length, turn < 2 ? 1 : 2);
         assertEquals(prompt.includes(OUTPUT_ATTACHMENT_INSTRUCTIONS), false);
         assertEquals(
           prompt.includes("When creating commits or pull requests"),
           false,
         );
-        if (turn < 2) assertEquals(prompt, request);
+        assertEquals(prompt, request);
         assertEquals(
           calls.filter((call) => call.method === "initialize").length,
           1,
         );
-        assertEquals(prompt.includes("You are in plan mode."), turn === 2);
+        assertEquals(prompt.includes("You are in plan mode."), false);
       }
       await restored.shutdown();
       // The next Bot generation must resume the saved conversation, not create one.
@@ -197,14 +205,22 @@ Deno.test("Admin: コミット・PR言語は保存・復旧し新規・継続・
         1,
       );
       assertEquals(
-        calls.find((call) => call.method === "thread/resume").params.threadId,
+        calls.filter((call) => call.method === "thread/resume").at(-1).params
+          .threadId,
         saved.sessionId,
       );
-      assertEquals(
-        calls.find((call) => call.method === "thread/resume").params
-          .developerInstructions,
-        calls.find((call) => call.method === "thread/start").params
-          .developerInstructions,
+      const instructions = calls.filter((call) =>
+        call.method === "thread/inject_items"
+      );
+      assertStringIncludes(
+        instructions.at(-1).params.items[0].content[0].text,
+        instructions[0].params.items[0].content[0].text.split(
+          "You are in normal mode.",
+        )[0],
+      );
+      assertStringIncludes(
+        instructions.at(-1).params.items[0].content[0].text,
+        "You are in plan mode.",
       );
     }
   } finally {

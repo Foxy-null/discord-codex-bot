@@ -8,6 +8,14 @@ import {
 } from "../src/workspace/workspace.ts";
 import { FakeCodexClient } from "./fixtures/fake-codex-client.ts";
 
+function threadInstructions(client: FakeCodexClient): string[] {
+  return client.calls.filter((call) => call.method === "thread/inject_items")
+    .map((call) =>
+      (call.params.items as { content: { text: string }[] }[])[0].content[0]
+        .text
+    );
+}
+
 async function setup(
   overrides: Partial<WorkerState> = {},
   appendSystemPrompt?: string,
@@ -65,13 +73,22 @@ Deno.test("Worker: 既存保存形式・作業コピー・会話ID・言語・�
     assertEquals(env.client.calls[0].method, "thread/resume");
     assertEquals(env.client.calls[0].params.threadId, "old-thread");
     assertEquals(env.client.calls[0].params.cwd, env.dir);
-    const instructions = env.client.calls[0].params
-      .developerInstructions as string;
+    const injection = env.client.calls[1];
+    assertEquals(injection.method, "thread/inject_items");
+    assertEquals(injection.params.threadId, "old-thread");
+    const item = (injection.params.items as {
+      role: string;
+      content: { text: string }[];
+    }[])[0];
+    assertEquals(item.role, "developer");
+    const instructions = item.content[0].text;
     assertStringIncludes(instructions, 'language specified by "ja"');
     assertStringIncludes(instructions, OUTPUT_ATTACHMENT_INSTRUCTIONS);
+    assertStringIncludes(instructions, "You are in plan mode.");
+    assertStringIncludes(instructions, "Do not implement changes");
     const input = env.client.calls.find((c) => c.method === "turn/start")!
       .params.input as { text: string }[];
-    assertStringIncludes(input[0].text, "You are in plan mode.");
+    assertEquals(input[0].text, "計画して");
     assertEquals(input[0].text.includes(OUTPUT_ATTACHMENT_INSTRUCTIONS), false);
     assertEquals(input[0].text.includes('language specified by "ja"'), false);
     assertEquals(worker.shouldAutoPush(), false);
@@ -109,10 +126,7 @@ Deno.test("Worker: 初回準備中の入力を受信順にSteerし、会話IDを
     const steer = await env.client.waitFor("turn/steer");
     assertEquals(steer.params.threadId, "thread-1");
     assertEquals(typeof steer.params.expectedTurnId, "string");
-    const instructions = env.client.calls.find((c) =>
-      c.method === "thread/start"
-    )!
-      .params.developerInstructions as string;
+    const instructions = threadInstructions(env.client)[0];
     assertStringIncludes(instructions, OUTPUT_ATTACHMENT_INSTRUCTIONS);
     assertStringIncludes(
       instructions,
@@ -137,6 +151,90 @@ Deno.test("Worker: 初回準備中の入力を受信順にSteerし、会話IDを
     env.client.complete("thread-1");
     assertEquals((await first)._unsafeUnwrap(), null);
     assertEquals(completions, 1);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: プラン切り替えは次のターンだけに適用し、指示と自動プッシュの判定をそろえる", async () => {
+  const env = await setup();
+  env.client.autoComplete = false;
+  try {
+    const first = env.worker.processMessage("実装して", [], async () => {
+      // Switch while the first turn is preparing, before its thread is loaded.
+      env.worker.setPlanMode(true);
+    });
+    await env.client.waitFor("turn/start");
+    assertStringIncludes(threadInstructions(env.client)[0], "normal mode");
+    assertEquals(env.worker.isPlanMode(), true);
+    assertEquals(
+      (await env.worker.processMessage("補足"))._unsafeUnwrap(),
+      null,
+    );
+    const steer = env.client.calls.find((call) =>
+      call.method === "turn/steer"
+    )!;
+    assertEquals((steer.params.input as { text: string }[])[0].text, "補足");
+    assertEquals(threadInstructions(env.client).length, 1);
+    env.client.complete("thread-1");
+    await first;
+    assertEquals(env.worker.shouldAutoPush(), true);
+
+    const planned = env.worker.processMessage("計画して");
+    await env.client.waitFor("turn/start", 2);
+    const plan = threadInstructions(env.client)[1];
+    assertStringIncludes(plan, "Only investigate and plan");
+    assertStringIncludes(plan, "Do not implement changes");
+    assertEquals(plan.includes(OUTPUT_ATTACHMENT_INSTRUCTIONS), false);
+    env.worker.setPlanMode(false);
+    assertEquals(
+      (await env.worker.processMessage("追加の条件"))._unsafeUnwrap(),
+      null,
+    );
+    assertEquals(threadInstructions(env.client).length, 2);
+    env.client.complete("thread-1");
+    await planned;
+    assertEquals(env.worker.shouldAutoPush(), false);
+
+    env.client.autoComplete = true;
+    await env.worker.processMessage("実装へ進んで");
+    assertStringIncludes(
+      threadInstructions(env.client)[2],
+      "Previous plan-mode restrictions no longer apply",
+    );
+    assertEquals(env.worker.shouldAutoPush(), true);
+    await env.worker.processMessage("通常モードを続けて");
+    assertEquals(threadInstructions(env.client).length, 3);
+    assertEquals(
+      env.client.calls.filter((call) =>
+        call.method === "thread/start" || call.method === "thread/resume"
+      ).length,
+      1,
+    );
+    assertEquals(env.state.sessionId, "thread-1");
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("Worker: モード指示の更新に失敗したらターンを始めず、次回に更新し直す", async () => {
+  const env = await setup();
+  try {
+    await env.worker.processMessage("通常の作業");
+    env.worker.setPlanMode(true);
+    env.client.hook = (method) => {
+      if (method === "thread/inject_items") throw new Error("指示更新の失敗");
+    };
+    assert((await env.worker.processMessage("計画して")).isErr());
+    assertEquals(env.worker.shouldAutoPush(), false);
+    assertEquals(
+      env.client.calls.filter((call) => call.method === "turn/start").length,
+      1,
+    );
+    env.client.hook = undefined;
+    assert((await env.worker.processMessage("計画を再試行して")).isOk());
+    assertEquals(threadInstructions(env.client).length, 3);
+    assertEquals(env.worker.shouldAutoPush(), false);
   } finally {
     await env.cleanup();
   }
