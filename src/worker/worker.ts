@@ -78,7 +78,7 @@ export class Worker implements IWorker {
   private readonly sessionLogger: SessionLogger;
   private readonly formatter = new MessageFormatter();
   private client: CodexClient | null;
-  private loaded = false;
+  private loadedPlanMode: boolean | null = null;
   private disposed = false;
   private active: ActiveMessage | null = null;
   private internalTurn: RunningTurn | null = null;
@@ -102,7 +102,7 @@ export class Worker implements IWorker {
   private attachClient(client: CodexClient): void {
     client.onNotification = (method, params) => this.receive(method, params);
     client.onFailure = (error) => {
-      this.loaded = false;
+      this.loadedPlanMode = null;
       for (const turn of this.turns.values()) turn.done.reject(error);
     };
   }
@@ -192,12 +192,13 @@ export class Worker implements IWorker {
           }
         }
         this.lastExecutionSucceeded = false;
+        const isPlanMode = this.isPlanMode();
         const active: ActiveMessage = {
           phase: "starting",
           finished: Promise.withResolvers<void>(),
           ready: Promise.withResolvers<RunningTurn | null>(),
           turn: null,
-          autoPush: this.state.autoPush === true && !this.isPlanMode(),
+          autoPush: this.state.autoPush === true && !isPlanMode,
           cancelled: false,
         };
         this.active = active;
@@ -207,7 +208,7 @@ export class Worker implements IWorker {
             onProgress,
             "🤖 Codexが処理を開始しました...",
           );
-          await this.ensureThread();
+          await this.ensureThread(isPlanMode);
           active.turn = await this.startTurn(
             this.state.sessionId!,
             input,
@@ -227,33 +228,47 @@ export class Worker implements IWorker {
     }
   }
 
-  private async ensureThread(): Promise<void> {
-    if (this.loaded) return;
-    const params = this.configuration.buildThreadParams(
-      this.state.worktreePath!,
-    );
-    params.developerInstructions = [
-      this.commitPrLanguageInstruction(),
-      "This preference applies only to commit messages and pull request titles and descriptions. Continue replying in the conversation's language.",
-      OUTPUT_ATTACHMENT_INSTRUCTIONS,
-      params.developerInstructions,
-    ].filter(Boolean).join("\n\n");
-    const response = await this.getClient().request(
-      this.state.sessionId ? "thread/resume" : "thread/start",
-      {
-        ...params,
-        ...(this.state.sessionId ? { threadId: this.state.sessionId } : {}),
-      },
-    );
-    const id = asRecord(response.thread).id;
-    if (typeof id !== "string" || !id) {
-      throw new Error("Codex会話IDを取得できませんでした。");
+  private async ensureThread(isPlanMode: boolean): Promise<void> {
+    if (this.loadedPlanMode === isPlanMode) return;
+    let instructions = "";
+    if (this.loadedPlanMode === null) {
+      const { developerInstructions, ...params } = this.configuration
+        .buildThreadParams(this.state.worktreePath!);
+      instructions = [
+        this.commitPrLanguageInstruction(),
+        "This preference applies only to commit messages and pull request titles and descriptions. Continue replying in the conversation's language.",
+        OUTPUT_ATTACHMENT_INSTRUCTIONS,
+        developerInstructions,
+      ].filter(Boolean).join("\n\n") + "\n\n";
+      const response = await this.getClient().request(
+        this.state.sessionId ? "thread/resume" : "thread/start",
+        {
+          ...params,
+          ...(this.state.sessionId ? { threadId: this.state.sessionId } : {}),
+        },
+      );
+      const id = asRecord(response.thread).id;
+      if (typeof id !== "string" || !id) {
+        throw new Error("Codex会話IDを取得できませんでした。");
+      }
+      // Keep the existing disk field; its value is Codex's thread.id, not session tree root.
+      this.state.sessionId = id;
+      const saved = await this.save();
+      if (saved.isErr()) throw new Error("Codex会話IDを保存できませんでした。");
     }
-    // Keep the existing disk field; its value is Codex's thread.id, not session tree root.
-    this.state.sessionId = id;
-    const saved = await this.save();
-    if (saved.isErr()) throw new Error("Codex会話IDを保存できませんでした。");
-    this.loaded = true;
+    instructions += isPlanMode
+      ? "You are in plan mode. Only investigate and plan. Do not implement changes, modify files, commit, or push. Return an ordered plan or ask clarifying questions in your reply, then stop. Wait for the user to disable plan mode before implementing."
+      : "You are in normal mode. Previous plan-mode restrictions no longer apply. Carry out the user's requests, including implementation when requested.";
+    // Resuming a persisted thread does not replace its developer instructions.
+    await this.getClient().request("thread/inject_items", {
+      threadId: this.state.sessionId,
+      items: [{
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: instructions }],
+      }],
+    });
+    this.loadedPlanMode = isPlanMode;
   }
 
   private async startTurn(
@@ -397,16 +412,7 @@ export class Worker implements IWorker {
     attachments: readonly SavedAttachment[],
   ): Record<string, unknown>[] {
     const prompt = formatPromptWithAttachments(
-      [
-        ...(this.isPlanMode()
-          ? [
-            "You are in plan mode.",
-            "Return an implementation plan before coding.",
-            "If coding is needed, include clear ordered steps.",
-          ]
-          : []),
-        message,
-      ].join("\n\n"),
+      message,
       attachments,
     );
     return [
@@ -550,7 +556,7 @@ export class Worker implements IWorker {
     }
     await this.client?.close();
     this.client = null;
-    this.loaded = false;
+    this.loadedPlanMode = null;
     this.state.repository = {
       fullName: repository.fullName,
       org: repository.org,
