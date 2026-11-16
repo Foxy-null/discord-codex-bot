@@ -165,7 +165,8 @@ Discord の通常チャンネルで次を実行します。
 会話の言語が変わった場合も、その会話に従います。
 
 この指定はコミット・PRにのみ適用し、Botの応答やスレッド・ブランチ名の言語設定には影響しません。
-言語方針は各依頼とともにCodexへ渡します。
+会話中にコミット・PRの言語を明示した場合は、その指定を優先します。
+言語方針はCodex会話の作成・再開時に共通指示として設定します。
 
 引数順は `repository` → `auto_push` → `language` です。 `auto_push` と
 `language` はどちらも省略できます。両方を指定する例:
@@ -281,7 +282,9 @@ codex app-server --listen stdio://
 
 `thread/start`または`thread/resume`で会話を読み込み、通常の開始は`turn/start`、
 実行中の追加指示は`turn/steer`、`/stop`は`turn/interrupt`を使います。
-画像添付は`localImage`入力、`CODEX_APPEND_SYSTEM_PROMPT`は`developerInstructions`として渡します。
+画像添付は`localImage`入力として渡します。
+コミット・PR言語と成果物添付の共通ルールは、`CODEX_APPEND_SYSTEM_PROMPT`と合わせて会話の作成・再開時に`developerInstructions`として渡します。
+各入力にはユーザー本文と添付情報、プランモードが有効な場合の計画指示を渡します。
 実行時は承認不要・sandbox制限なし・Web検索有効とし、未対応の対話要求には明示的にエラーを返します。
 自動コミットのメッセージ生成には、独立した一時的なread-only会話を使います。
 `/close`とBot停止時には子プロセスも終了します。`codex-cli 0.160.0`で接続と復旧を検証しています。
@@ -311,7 +314,7 @@ Workerの保存形式は変更していません。作業コピー、`sessionId`
 
 ### 成果物添付の指定
 
-Botは各依頼に、成果物を最終回答の独立した行で指定する指示を追加します。
+BotはCodex会話の作成・再開時に、成果物を最終回答の独立した行で指定する共通指示を設定します。
 
 ```text
 [[attachment:reports/result.pdf]]
