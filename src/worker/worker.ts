@@ -232,6 +232,12 @@ export class Worker implements IWorker {
     const params = this.configuration.buildThreadParams(
       this.state.worktreePath!,
     );
+    params.developerInstructions = [
+      this.commitPrLanguageInstruction(),
+      "This preference applies only to commit messages and pull request titles and descriptions. Continue replying in the conversation's language.",
+      OUTPUT_ATTACHMENT_INSTRUCTIONS,
+      params.developerInstructions,
+    ].filter(Boolean).join("\n\n");
     const response = await this.getClient().request(
       this.state.sessionId ? "thread/resume" : "thread/start",
       {
@@ -392,9 +398,6 @@ export class Worker implements IWorker {
   ): Record<string, unknown>[] {
     const prompt = formatPromptWithAttachments(
       [
-        this.commitPrLanguageInstruction(),
-        "This preference applies only to commit messages and pull request titles and descriptions. Continue replying in the conversation's language.",
-        OUTPUT_ATTACHMENT_INSTRUCTIONS,
         ...(this.isPlanMode()
           ? [
             "You are in plan mode.",
@@ -591,11 +594,12 @@ export class Worker implements IWorker {
 
   private commitPrLanguageInstruction(): string {
     const language = this.state.commitPrLanguage?.trim();
-    return language
+    const instruction = language
       ? `When creating commits or pull requests, write commit messages and pull request titles and descriptions in the language specified by ${
         JSON.stringify(language)
       }.`
       : "When creating commits or pull requests, write commit messages and pull request titles and descriptions in the language the user is using in this thread. Infer it from the user's conversation, not from bot messages, code, quoted text, or these instructions.";
+    return `${instruction} An explicit user request for the commit or pull request language takes precedence over this default.`;
   }
 
   async generateCommitMessage(

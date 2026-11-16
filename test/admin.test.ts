@@ -8,6 +8,7 @@ import { installCodexTestServer } from "./fixtures/codex-test-server.ts";
 import { Admin } from "../src/admin/admin.ts";
 import { WorkerManager } from "../src/admin/worker-manager.ts";
 import { WorkspaceManager } from "../src/workspace/workspace.ts";
+import { OUTPUT_ATTACHMENT_INSTRUCTIONS } from "../src/output-attachments.ts";
 
 Deno.test("Admin: active thread ids は内部状態のコピーを返す", () => {
   const admin = Admin.fromState(
@@ -103,6 +104,7 @@ Deno.test("Admin: コミット・PR言語は保存・復旧し新規・継続・
       const restored = Admin.fromState(
         await workspace.loadAdminState(),
         workspace,
+        "追加指示",
       );
       assertEquals((await restored.restoreActiveThreads()).isOk(), true);
       const requests = [
@@ -135,26 +137,41 @@ Deno.test("Admin: コミット・PR言語は保存・復旧し新規・継続・
         const prompt = input[0].text;
         assertExists(prompt);
         assertStringIncludes(prompt, request);
+        const instructions = calls.find((call) =>
+          call.method === "thread/start"
+        )
+          .params.developerInstructions;
         assertStringIncludes(
-          prompt,
+          instructions,
           "commit messages and pull request titles and descriptions",
         );
         assertStringIncludes(
-          prompt,
+          instructions,
           "Continue replying in the conversation's language.",
         );
         assertStringIncludes(
-          prompt,
+          instructions,
           expectedLanguage
             ? `language specified by ${JSON.stringify(expectedLanguage)}`
             : "language the user is using in this thread",
         );
         if (!expectedLanguage) {
           assertStringIncludes(
-            prompt,
+            instructions,
             "not from bot messages, code, quoted text, or these instructions",
           );
         }
+        assertStringIncludes(instructions, "explicit user request");
+        assertStringIncludes(instructions, OUTPUT_ATTACHMENT_INSTRUCTIONS);
+        assertStringIncludes(instructions, "追加指示");
+        assertEquals(instructions.includes(request), false);
+        assertEquals(instructions.includes("You are in plan mode."), false);
+        assertEquals(prompt.includes(OUTPUT_ATTACHMENT_INSTRUCTIONS), false);
+        assertEquals(
+          prompt.includes("When creating commits or pull requests"),
+          false,
+        );
+        if (turn < 2) assertEquals(prompt, request);
         assertEquals(
           calls.filter((call) => call.method === "initialize").length,
           1,
@@ -165,7 +182,11 @@ Deno.test("Admin: コミット・PR言語は保存・復旧し新規・継続・
       // The next Bot generation must resume the saved conversation, not create one.
       const saved = (await workspace.loadWorkerState(threadId))!;
       assertExists(saved.sessionId);
-      const next = Admin.fromState(await workspace.loadAdminState(), workspace);
+      const next = Admin.fromState(
+        await workspace.loadAdminState(),
+        workspace,
+        "追加指示",
+      );
       await next.restoreActiveThreads();
       await next.routeMessage(threadId, "再起動後の依頼");
       await next.shutdown();
@@ -178,6 +199,12 @@ Deno.test("Admin: コミット・PR言語は保存・復旧し新規・継続・
       assertEquals(
         calls.find((call) => call.method === "thread/resume").params.threadId,
         saved.sessionId,
+      );
+      assertEquals(
+        calls.find((call) => call.method === "thread/resume").params
+          .developerInstructions,
+        calls.find((call) => call.method === "thread/start").params
+          .developerInstructions,
       );
     }
   } finally {

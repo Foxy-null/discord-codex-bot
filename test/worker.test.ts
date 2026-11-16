@@ -8,7 +8,10 @@ import {
 } from "../src/workspace/workspace.ts";
 import { FakeCodexClient } from "./fixtures/fake-codex-client.ts";
 
-async function setup(overrides: Partial<WorkerState> = {}) {
+async function setup(
+  overrides: Partial<WorkerState> = {},
+  appendSystemPrompt?: string,
+) {
   const dir = await Deno.makeTempDir();
   const workspace = new WorkspaceManager(dir);
   await workspace.initialize();
@@ -25,7 +28,7 @@ async function setup(overrides: Partial<WorkerState> = {}) {
     ...overrides,
   };
   const client = new FakeCodexClient();
-  const worker = new Worker(state, workspace, client);
+  const worker = new Worker(state, workspace, client, appendSystemPrompt);
   return {
     dir,
     workspace,
@@ -62,11 +65,15 @@ Deno.test("Worker: 既存保存形式・作業コピー・会話ID・言語・�
     assertEquals(env.client.calls[0].method, "thread/resume");
     assertEquals(env.client.calls[0].params.threadId, "old-thread");
     assertEquals(env.client.calls[0].params.cwd, env.dir);
+    const instructions = env.client.calls[0].params
+      .developerInstructions as string;
+    assertStringIncludes(instructions, 'language specified by "ja"');
+    assertStringIncludes(instructions, OUTPUT_ATTACHMENT_INSTRUCTIONS);
     const input = env.client.calls.find((c) => c.method === "turn/start")!
       .params.input as { text: string }[];
-    assertStringIncludes(input[0].text, 'language specified by "ja"');
     assertStringIncludes(input[0].text, "You are in plan mode.");
-    assertStringIncludes(input[0].text, OUTPUT_ATTACHMENT_INSTRUCTIONS);
+    assertEquals(input[0].text.includes(OUTPUT_ATTACHMENT_INSTRUCTIONS), false);
+    assertEquals(input[0].text.includes('language specified by "ja"'), false);
     assertEquals(worker.shouldAutoPush(), false);
     assertEquals(
       (await env.workspace.loadWorkerState("discord-1"))?.sessionId,
@@ -79,7 +86,7 @@ Deno.test("Worker: 既存保存形式・作業コピー・会話ID・言語・�
 });
 
 Deno.test("Worker: 初回準備中の入力を受信順にSteerし、会話IDを終了前に保存する", async () => {
-  const env = await setup();
+  const env = await setup({}, "追加指示");
   env.client.autoComplete = false;
   const prepared = Promise.withResolvers<void>();
   let completions = 0;
@@ -102,6 +109,21 @@ Deno.test("Worker: 初回準備中の入力を受信順にSteerし、会話IDを
     const steer = await env.client.waitFor("turn/steer");
     assertEquals(steer.params.threadId, "thread-1");
     assertEquals(typeof steer.params.expectedTurnId, "string");
+    const instructions = env.client.calls.find((c) =>
+      c.method === "thread/start"
+    )!
+      .params.developerInstructions as string;
+    assertStringIncludes(instructions, OUTPUT_ATTACHMENT_INSTRUCTIONS);
+    assertStringIncludes(
+      instructions,
+      "language the user is using in this thread",
+    );
+    assertStringIncludes(instructions, "explicit user request");
+    assertStringIncludes(instructions, "追加指示");
+    const input = env.client.calls.find((c) => c.method === "turn/start")!
+      .params.input as { text: string }[];
+    assertEquals(input[0].text, "最初");
+    assertEquals((steer.params.input as { text: string }[])[0].text, "追加");
     assertEquals((await extra)._unsafeUnwrap(), null);
     assertEquals(
       env.client.calls.filter((c) => c.method === "turn/start").length,
@@ -258,7 +280,7 @@ Deno.test("Worker: 完了直前に拒否された追加指示だけを、後処�
 });
 
 Deno.test("Worker: コミット生成を一時的なread-only会話へ隔離し、入力と後処理を競合させない", async () => {
-  const env = await setup({ commitPrLanguage: "日本語" });
+  const env = await setup({ commitPrLanguage: "日本語" }, "追加指示");
   env.client.autoComplete = false;
   const finish = Promise.withResolvers<void>();
   const finalizing = Promise.withResolvers<void>();
@@ -282,6 +304,7 @@ Deno.test("Worker: コミット生成を一時的なread-only会話へ隔離し�
     const internal = await env.client.waitFor("thread/start", 2);
     assertEquals(internal.params.ephemeral, true);
     assertEquals(internal.params.sandbox, "read-only");
+    assertEquals(internal.params.developerInstructions, "追加指示");
     const commitTurn = await env.client.waitFor("turn/start", 2);
     assertEquals(commitTurn.params.threadId, "internal-2");
     const input = commitTurn.params.input as { text: string }[];
